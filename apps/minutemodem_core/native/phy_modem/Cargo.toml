@@ -1,0 +1,25 @@
+[package]
+name = "phy_modem"
+version = "0.1.0"
+edition = "2021"
+authors = ["HeroesLament"]
+description = "8-PSK modulator MIL-STD-188-141D"
+
+[lib]
+name = "phy_modem"
+crate-type = ["cdylib"]
+
+[dependencies]
+rustler = "0.37"
+
+[[bench]]
+name = "modulate"
+harness = false
+
+[[bench]]
+name = "demodulate"
+harness = false
+
+[profile.release]
+opt-level = 3
+lto = true

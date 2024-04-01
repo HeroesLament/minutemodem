@@ -1,2 +1,15 @@
 node_modules
 .node_modules/
+target
+Cargo.lock
+index-*.js
+
+src/dist/
+
+*.lock
+
+deps/
+
+_build/
+
+*.so

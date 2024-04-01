@@ -1,0 +1,12 @@
+[package]
+name = "dsp_utils"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "dsp_utils"
+crate-type = ["cdylib"]
+
+[dependencies]
+rustler = "0.37"
+rustfft = "6.1"
