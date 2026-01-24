@@ -1,6 +1,12 @@
+matrix:
+  IMAGE:
+    - hexpm/elixir:1.17.0-erlang-25.3.2-debian-bookworm-20260112-slim
+    - hexpm/elixir:1.18.0-erlang-27.3-ubuntu-noble-20260113
+    - hexpm/elixir:1.19.5-erlang-27.3-ubuntu-noble-20260113
+
 steps:
   - name: test
-    image: hexpm/elixir:1.19.5-erlang-27.3-ubuntu-noble-20260113
+    image: ${IMAGE}
     commands:
       - apt-get update && apt-get install -y curl build-essential
       - curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
