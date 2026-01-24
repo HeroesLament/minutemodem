@@ -5,8 +5,8 @@ steps:
       - apt-get update && apt-get install -y curl build-essential
       - curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
       - . $HOME/.cargo/env
+      - cd apps/minutemodem_core
       - mix local.hex --force
       - mix local.rebar --force
       - mix deps.get
-      - mix deps.compile
       - mix compile
