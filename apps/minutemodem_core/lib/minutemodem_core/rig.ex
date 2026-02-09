@@ -117,6 +117,9 @@ defmodule MinuteModemCore.Rig do
   defdelegate get_mode(rig_id), to: Control
   defdelegate ptt(rig_id, state), to: Control
   defdelegate get_ptt(rig_id), to: Control
+  defdelegate acquire_tx(rig_id, owner), to: Control
+  defdelegate release_tx(rig_id, owner), to: Control
+  defdelegate tx_owner(rig_id), to: Control
 
   @doc "Get rig control status for UI"
   def status(rig_id), do: Control.status(rig_id)
@@ -128,6 +131,15 @@ defmodule MinuteModemCore.Rig do
   defdelegate play_file(rig_id, file_path, opts \\ []), to: Audio
   defdelegate stop_playback(rig_id), to: Audio
   defdelegate playback_state(rig_id), to: Audio
+
+  # --- Audio Endpoint API (delegated) ---
+
+  alias MinuteModemCore.Rig.AudioEndpoint
+
+  defdelegate audio_attach(rig_id, pid \\ self()), to: AudioEndpoint, as: :attach
+  defdelegate audio_detach(rig_id), to: AudioEndpoint, as: :detach
+  defdelegate voice_signal(rig_id, signal), to: AudioEndpoint
+  defdelegate push_voice_tx(rig_id, pcm), to: AudioEndpoint
 
   # --- Registry queries ---
 

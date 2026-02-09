@@ -1,0 +1,18 @@
+[package]
+name = "melpe"
+version = "0.1.0"
+edition = "2021"
+authors = ["HeroesLament"]
+description = "MELPe 600 bps vocoder NIF — STANAG 4591"
+
+[lib]
+name = "melpe"
+crate-type = ["cdylib"]
+
+[dependencies]
+rustler = "0.37"
+melpe_codec = { package = "melpe-rs", version = "0.1" }
+
+[profile.release]
+opt-level = 3
+lto = true

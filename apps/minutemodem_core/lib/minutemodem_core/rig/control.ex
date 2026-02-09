@@ -23,7 +23,8 @@ defmodule MinuteModemCore.Rig.Control do
     :backend_state,
     :frequency,
     :mode,
-    :ptt
+    :ptt,
+    :tx_owner       # nil | :ale | :data | :voice
   ]
 
   # --- Public API ---
@@ -64,6 +65,27 @@ defmodule MinuteModemCore.Rig.Control do
   @doc "Get current PTT state"
   def get_ptt(rig_id) do
     GenServer.call(via(rig_id), :get_ptt)
+  end
+
+  @doc """
+  Acquire TX ownership. Asserts PTT on the hardware.
+  Returns :ok if acquired, {:error, :busy} if another owner has it.
+  """
+  def acquire_tx(rig_id, owner) when owner in [:ale, :data, :voice] do
+    GenServer.call(via(rig_id), {:acquire_tx, owner})
+  end
+
+  @doc """
+  Release TX ownership. Deasserts PTT on the hardware.
+  Only succeeds if caller matches current owner.
+  """
+  def release_tx(rig_id, owner) when owner in [:ale, :data, :voice] do
+    GenServer.call(via(rig_id), {:release_tx, owner})
+  end
+
+  @doc "Get current TX owner. Returns nil | :ale | :data | :voice."
+  def tx_owner(rig_id) do
+    GenServer.call(via(rig_id), :tx_owner)
   end
 
   @doc """
@@ -155,6 +177,42 @@ defmodule MinuteModemCore.Rig.Control do
     {:reply, {:ok, state.ptt}, state}
   end
 
+  # --- TX ownership ---
+
+  @impl true
+  def handle_call({:acquire_tx, owner}, _from, %{tx_owner: nil} = state) do
+    case backend_ptt(state, :on) do
+      :ok ->
+        Logger.info("[Rig.Control] TX acquired by :#{owner} for rig #{state.rig_id}")
+        {:reply, :ok, %{state | tx_owner: owner, ptt: :on}}
+
+      {:error, _} = err ->
+        {:reply, err, state}
+    end
+  end
+
+  def handle_call({:acquire_tx, _owner}, _from, state) do
+    {:reply, {:error, :busy}, state}
+  end
+
+  @impl true
+  def handle_call({:release_tx, owner}, _from, %{tx_owner: owner} = state) do
+    Logger.info("[Rig.Control] TX released by :#{owner} for rig #{state.rig_id}")
+
+    # Deassert PTT even if backend errors — don't leave ownership stuck
+    backend_ptt(state, :off)
+    {:reply, :ok, %{state | tx_owner: nil, ptt: :off}}
+  end
+
+  def handle_call({:release_tx, _wrong_owner}, _from, state) do
+    {:reply, {:error, :not_owner}, state}
+  end
+
+  @impl true
+  def handle_call(:tx_owner, _from, state) do
+    {:reply, state.tx_owner, state}
+  end
+
   @impl true
   def handle_call(:status, _from, state) do
     status = %{
@@ -163,6 +221,7 @@ defmodule MinuteModemCore.Rig.Control do
       frequency: state.frequency,
       mode: state.mode,
       ptt: state.ptt,
+      tx_owner: state.tx_owner,
       backend_status: backend_status(state)
     }
 

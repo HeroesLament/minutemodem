@@ -25,7 +25,11 @@ defmodule MinuteModemUI.MixProject do
 
   defp deps do
     [
-      {:wx_mvu, path: "../wx_mvu"}
+      {:wx_mvu, "~> 0.1"},
+
+      # Audio I/O (operator mic + speaker)
+      {:membrane_core, "~> 1.0"},
+      {:membrane_portaudio_plugin, "~> 0.16"}
     ]
   end
 end

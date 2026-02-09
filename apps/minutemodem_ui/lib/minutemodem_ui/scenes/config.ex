@@ -21,6 +21,8 @@ defmodule MinuteModemUI.Scenes.Config do
       audio_devices: devices,
       selected_input_name: input_default,
       selected_output_name: output_default,
+      selected_mic_name: input_default,
+      selected_speaker_name: output_default,
       codeplug_path: nil
     }
   end
@@ -37,6 +39,16 @@ defmodule MinuteModemUI.Scenes.Config do
   def handle_event({:ui_event, :config_output_device, :change, index}, model) do
     device = output_devices(model.audio_devices) |> Enum.at(index)
     %{model | selected_output_name: device && device.name}
+  end
+
+  def handle_event({:ui_event, :config_mic_device, :change, index}, model) do
+    device = input_devices(model.audio_devices) |> Enum.at(index)
+    %{model | selected_mic_name: device && device.name}
+  end
+
+  def handle_event({:ui_event, :config_speaker_device, :change, index}, model) do
+    device = output_devices(model.audio_devices) |> Enum.at(index)
+    %{model | selected_speaker_name: device && device.name}
   end
 
   def handle_event({:ui_event, :config_refresh_devices, :click}, model) do
@@ -63,21 +75,26 @@ defmodule MinuteModemUI.Scenes.Config do
 
     input_index = find_index_by_name(input_devs, model.selected_input_name)
     output_index = find_index_by_name(output_devs, model.selected_output_name)
+    mic_index = find_index_by_name(input_devs, model.selected_mic_name)
+    speaker_index = find_index_by_name(output_devs, model.selected_speaker_name)
 
     [
       {:ensure_panel, :config_root, {:page, :config}, []},
 
-      {:ensure_widget, :config_audio_box, :static_box, :config_root,
-       label: "Operator Audio Devices"},
+      # -- Rig Audio Devices --
 
+      {:ensure_widget, :config_audio_box, :static_box, :config_root,
+       label: "Rig Audio Devices"},
+
+      {:ensure_widget, :config_input_label, :static_text, :config_audio_box,
+       label: "Rig RX Input:"},
       {:ensure_widget, :config_input_device, :choice, :config_audio_box,
        choices: input_names},
 
+      {:ensure_widget, :config_output_label, :static_text, :config_audio_box,
+       label: "Rig TX Output:"},
       {:ensure_widget, :config_output_device, :choice, :config_audio_box,
        choices: output_names},
-
-      {:ensure_widget, :config_refresh_devices, :button, :config_audio_box,
-       label: "Refresh Devices"},
 
       {:set, :config_input_device, items: input_names},
       {:set, :config_output_device, items: output_names},
@@ -87,10 +104,43 @@ defmodule MinuteModemUI.Scenes.Config do
       {:layout, :config_audio_box,
        {:vbox, [],
         [
-          :config_input_device,
-          :config_output_device,
-          {:config_refresh_devices, align: :center}
+          {:hbox, [], [:config_input_label, :config_input_device]},
+          {:hbox, [], [:config_output_label, :config_output_device]}
         ]}},
+
+      # -- Operator Mic / Speaker --
+
+      {:ensure_widget, :config_operator_box, :static_box, :config_root,
+       label: "Operator Audio"},
+
+      {:ensure_widget, :config_mic_label, :static_text, :config_operator_box,
+       label: "Operator Mic:"},
+      {:ensure_widget, :config_mic_device, :choice, :config_operator_box,
+       choices: input_names},
+
+      {:ensure_widget, :config_speaker_label, :static_text, :config_operator_box,
+       label: "Operator Speaker:"},
+      {:ensure_widget, :config_speaker_device, :choice, :config_operator_box,
+       choices: output_names},
+
+      {:set, :config_mic_device, items: input_names},
+      {:set, :config_speaker_device, items: output_names},
+      {:set, :config_mic_device, selected: mic_index},
+      {:set, :config_speaker_device, selected: speaker_index},
+
+      {:layout, :config_operator_box,
+       {:vbox, [],
+        [
+          {:hbox, [], [:config_mic_label, :config_mic_device]},
+          {:hbox, [], [:config_speaker_label, :config_speaker_device]}
+        ]}},
+
+      # -- Refresh --
+
+      {:ensure_widget, :config_refresh_devices, :button, :config_root,
+       label: "Refresh Devices"},
+
+      # -- Codeplug Import --
 
       {:ensure_widget, :config_codeplug_box, :static_box, :config_root,
        label: "Import Codeplug"},

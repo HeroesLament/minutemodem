@@ -13,3 +13,11 @@ deps/
 _build/
 
 *.so
+
+build/
+
+rel/
+
+*.db-shm
+
+*.db-wal

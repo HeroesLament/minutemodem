@@ -20,7 +20,7 @@ defmodule MinuteModemClient.MixProject do
 
   defp deps do
     [
-      {:wx_mvu, in_umbrella: true},
+      {:wx_mvu, "~> 0.1"},
       {:gen_state_machine, "~> 3.0"}
     ]
   end

@@ -46,6 +46,7 @@ defmodule MinuteModemCore.Modem.TxFSM do
 
   alias MinuteModemCore.Modem.{Events, Arbiter}
   alias MinuteModemCore.Modem110D.{Tx, Codec, Tables, Waveforms}
+  alias MinuteModemCore.Rig.Control
 
   # ============================================================================
   # State Data
@@ -78,7 +79,9 @@ defmodule MinuteModemCore.Modem.TxFSM do
     # Audio output callback
     :audio_sink,       # pid or function to receive audio samples
     # Simnet mode flag (synchronous audio delivery)
-    :use_simnet        # true if audio delivery is synchronous (no drain needed)
+    :use_simnet,       # true if audio delivery is synchronous (no drain needed)
+    # Rig-level TX ownership (via Rig.Control)
+    :rig_tx_acquired   # true when we hold Rig.Control TX ownership
   ]
 
   # ============================================================================
@@ -177,7 +180,8 @@ defmodule MinuteModemCore.Modem.TxFSM do
       critical_timer: nil,
       seen_last: false,
       audio_sink: Keyword.get(opts, :audio_sink),
-      use_simnet: use_simnet
+      use_simnet: use_simnet,
+      rig_tx_acquired: false
     }
 
     Logger.info("[Modem.TxFSM] Started for rig #{rig_id}, wf=#{waveform}, bw=#{bw_khz}kHz, rate=#{data_rate}bps")
@@ -374,19 +378,32 @@ defmodule MinuteModemCore.Modem.TxFSM do
   def starting(:enter, _old_state, data) do
     emit_status(data, :starting)
 
-    # Collect all queued data
-    all_data = collect_queue_data(data.queue)
+    # Acquire rig-level TX ownership (asserts PTT on hardware)
+    case Control.acquire_tx(data.rig_id, :data) do
+      :ok ->
+        data = %{data | rig_tx_acquired: true}
 
-    Logger.info("[Modem.TxFSM] Starting transmission: #{byte_size(all_data)} bytes")
+        # Collect all queued data
+        all_data = collect_queue_data(data.queue)
 
-    # Encode and transmit - always succeeds with {:ok, samples}
-    {:ok, audio_samples} = encode_and_transmit(all_data, data)
+        Logger.info("[Modem.TxFSM] Starting transmission: #{byte_size(all_data)} bytes")
 
-    # Send audio to sink
-    send_audio(data, audio_samples)
+        # Encode and transmit - always succeeds with {:ok, samples}
+        {:ok, audio_samples} = encode_and_transmit(all_data, data)
 
-    # Transition to started (will drain as audio plays)
-    {:keep_state, data, [{:state_timeout, 100, :check_drain}]}
+        # Send audio to sink
+        send_audio(data, audio_samples)
+
+        # Transition to started (will drain as audio plays)
+        {:keep_state, data, [{:state_timeout, 100, :check_drain}]}
+
+      {:error, :busy} ->
+        Logger.warning("[Modem.TxFSM] Rig TX busy, cannot start transmission")
+        emit_event(data.rig_id, {:tx_status, %{state: :tx_busy}})
+        # Release arbiter and go back to flushed
+        Arbiter.release_tx(via_arbiter(data.rig_id))
+        {:next_state, :flushed, data}
+    end
   end
 
   def starting({:call, from}, {:data, payload, order}, data) do
@@ -419,6 +436,7 @@ defmodule MinuteModemCore.Modem.TxFSM do
 
   def starting(:cast, :abort, data) do
     Arbiter.release_tx(via_arbiter(data.rig_id))
+    data = release_rig_tx(data)
     {:next_state, :flushed, data}
   end
 
@@ -531,6 +549,7 @@ defmodule MinuteModemCore.Modem.TxFSM do
   def started(:info, :tx_complete, data) do
     # Audio playback finished
     Arbiter.release_tx(via_arbiter(data.rig_id))
+    data = release_rig_tx(data)
     {:next_state, :flushed, data}
   end
 
@@ -574,12 +593,14 @@ defmodule MinuteModemCore.Modem.TxFSM do
 
   def draining_ok(:info, :tx_complete, data) do
     Arbiter.release_tx(via_arbiter(data.rig_id))
+    data = release_rig_tx(data)
     {:next_state, :flushed, data}
   end
 
   def draining_ok(:state_timeout, :simnet_flush, data) do
     # Simnet audio is synchronous - safe to flush immediately
     Arbiter.release_tx(via_arbiter(data.rig_id))
+    data = release_rig_tx(data)
     {:next_state, :flushed, data}
   end
 
@@ -587,6 +608,7 @@ defmodule MinuteModemCore.Modem.TxFSM do
     # Audio should have finished by now
     Logger.warning("[Modem.TxFSM] Drain timeout, forcing flush")
     Arbiter.release_tx(via_arbiter(data.rig_id))
+    data = release_rig_tx(data)
     {:next_state, :flushed, data}
   end
 
@@ -623,11 +645,13 @@ defmodule MinuteModemCore.Modem.TxFSM do
 
   def draining_forced(:info, :tx_complete, data) do
     Arbiter.release_tx(via_arbiter(data.rig_id))
+    data = release_rig_tx(data)
     {:next_state, :flushed, data}
   end
 
   def draining_forced(:state_timeout, :force_flush, data) do
     Arbiter.release_tx(via_arbiter(data.rig_id))
+    data = release_rig_tx(data)
     {:next_state, :flushed, data}
   end
 
@@ -672,8 +696,16 @@ defmodule MinuteModemCore.Modem.TxFSM do
       queued_bytes: 0,
       prefill_received: 0,
       seen_last: false,
-      critical_timer: nil
+      critical_timer: nil,
+      rig_tx_acquired: false
     }
+  end
+
+  defp release_rig_tx(%{rig_tx_acquired: false} = data), do: data
+
+  defp release_rig_tx(%{rig_tx_acquired: true} = data) do
+    Control.release_tx(data.rig_id, :data)
+    %{data | rig_tx_acquired: false}
   end
 
   defp queue_data(data, payload, order) do

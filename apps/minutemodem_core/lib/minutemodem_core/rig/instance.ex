@@ -79,6 +79,8 @@ defmodule MinuteModemCore.Rig.Instance do
         {MinuteModemCore.Rig.Audio, spec},
         {MinuteModemCore.Modem.Supervisor, modem_opts},
         {MinuteModemCore.Rig.AudioPipeline, audio_opts},
+        {MinuteModemCore.Rig.AudioEndpoint, rig_id: spec.id},
+        {MinuteModemCore.Voice, rig_id: spec.id},
         simnet_bridge_child(rig_type, spec),
         {MinuteModemCore.ALE.Receiver, ale_rx_opts},
         {MinuteModemCore.ALE.Transmitter, ale_tx_opts},
@@ -134,6 +136,20 @@ defmodule MinuteModemCore.Rig.Instance do
 
   def simnet_bridge_pid(rig_id) do
     case Registry.lookup(MinuteModemCore.Rig.InstanceRegistry, {rig_id, :simnet_bridge}) do
+      [{pid, _}] -> pid
+      [] -> nil
+    end
+  end
+
+  def audio_endpoint_pid(rig_id) do
+    case Registry.lookup(MinuteModemCore.Rig.InstanceRegistry, {rig_id, :audio_endpoint}) do
+      [{pid, _}] -> pid
+      [] -> nil
+    end
+  end
+
+  def voice_pid(rig_id) do
+    case Registry.lookup(MinuteModemCore.Rig.InstanceRegistry, {rig_id, :voice}) do
       [{pid, _}] -> pid
       [] -> nil
     end

@@ -18,6 +18,7 @@ defmodule MinuteModemUI.Application do
     {:ok, _} = WxMVU.start_scene(MinuteModemUI.Scenes.Callsigns)
     {:ok, _} = WxMVU.start_scene(MinuteModemUI.Scenes.Config)
     {:ok, _} = WxMVU.start_scene(MinuteModemUI.Scenes.Ops)
+    {:ok, _} = WxMVU.start_scene(MinuteModemUI.Scenes.Voice)
 
     # Our own supervisor (for any non-UI processes)
     children = []
@@ -32,6 +33,7 @@ defmodule MinuteModemUI.Application do
   Reload all scenes (useful for development).
   """
   def reload do
+    WxMVU.stop_scene(MinuteModemUI.Scenes.Voice)
     WxMVU.stop_scene(MinuteModemUI.Scenes.Ops)
     WxMVU.stop_scene(MinuteModemUI.Scenes.Callsigns)
     WxMVU.stop_scene(MinuteModemUI.Scenes.Nets)
@@ -45,6 +47,7 @@ defmodule MinuteModemUI.Application do
     {:ok, _} = WxMVU.start_scene(MinuteModemUI.Scenes.Nets)
     {:ok, _} = WxMVU.start_scene(MinuteModemUI.Scenes.Callsigns)
     {:ok, _} = WxMVU.start_scene(MinuteModemUI.Scenes.Ops)
+    {:ok, _} = WxMVU.start_scene(MinuteModemUI.Scenes.Voice)
 
     :ok
   end

@@ -17,6 +17,7 @@ defmodule MinuteModemCore.ALE.Transmitter do
 
   alias MinuteModemCore.DSP.PhyModem
   alias MinuteModemCore.Modem.Events
+  alias MinuteModemCore.Rig.Control
 
   @default_sample_rate 9600
 
@@ -79,6 +80,28 @@ defmodule MinuteModemCore.ALE.Transmitter do
   def handle_call({:transmit, symbols}, _from, state) do
     Logger.debug("ALE TX [#{state.rig_id}] transmitting #{length(symbols)} symbols")
 
+    case Control.acquire_tx(state.rig_id, :ale) do
+      :ok ->
+        result = do_transmit(symbols, state)
+        Control.release_tx(state.rig_id, :ale)
+        {:reply, result, state}
+
+      {:error, :busy} ->
+        Logger.warning("ALE TX [#{state.rig_id}] rig TX busy, cannot transmit")
+        {:reply, {:error, :tx_busy}, state}
+    end
+  end
+
+  @impl true
+  def handle_call(:get_state, _from, state) do
+    {:reply, state.tx_state, state}
+  end
+
+  # -------------------------------------------------------------------
+  # Internal
+  # -------------------------------------------------------------------
+
+  defp do_transmit(symbols, state) do
     samples = PhyModem.unified_mod_modulate(state.modulator, symbols)
     tail = PhyModem.unified_mod_flush(state.modulator)
     all_samples = samples ++ tail
@@ -92,17 +115,12 @@ defmodule MinuteModemCore.ALE.Transmitter do
 
     broadcast_tx_event(state.rig_id, length(symbols), length(all_samples), duration_ms)
 
-    {:reply, result, state}
+    result
+  rescue
+    e ->
+      Logger.error("ALE TX [#{state.rig_id}] transmit failed: #{inspect(e)}")
+      {:error, e}
   end
-
-  @impl true
-  def handle_call(:get_state, _from, state) do
-    {:reply, state.tx_state, state}
-  end
-
-  # -------------------------------------------------------------------
-  # Internal
-  # -------------------------------------------------------------------
 
   defp send_to_audio_pipeline(rig_id, samples, _sample_rate) do
     # Convert samples to binary (s16le)

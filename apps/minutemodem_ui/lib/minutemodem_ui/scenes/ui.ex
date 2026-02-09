@@ -18,6 +18,7 @@ defmodule MinuteModemUI.Scenes.UI do
       active_tab: 0,
       pages: [
         {:ops, nil},
+        {:voice, nil},
         {:rigs, nil},
         {:nets, nil},
         {:callsigns, nil},
@@ -90,6 +91,7 @@ defmodule MinuteModemUI.Scenes.UI do
   end
 
   defp page_title(:ops), do: "Ops"
+  defp page_title(:voice), do: "Voice"
   defp page_title(:rigs), do: "Rigs"
   defp page_title(:nets), do: "Nets"
   defp page_title(:callsigns), do: "Callsigns"
