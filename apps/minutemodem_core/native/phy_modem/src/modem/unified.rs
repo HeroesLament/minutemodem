@@ -415,9 +415,9 @@ fn qam64_iq_to_symbol(i: f64, q: f64) -> u8 {
 // ============================================================================
 
 const RRC_ALPHA: f64 = 0.35;
-const RRC_SPAN: usize = 6;
+pub(crate) const RRC_SPAN: usize = 6;
 
-fn generate_rrc_coeffs(sps: usize) -> Vec<f64> {
+pub(crate) fn generate_rrc_coeffs(sps: usize) -> Vec<f64> {
     let len = 2 * RRC_SPAN * sps + 1;
     let mut coeffs = vec![0.0; len];
     let center = (len - 1) / 2;
@@ -514,10 +514,10 @@ impl DFEConfig {
         Self {
             ff_taps: 21,
             fb_taps: 10,
-            mu: 0.02,
-            mu_cma: 0.003,
-            leakage: 0.9999,
-            update_threshold: 0.15,
+            mu: 0.03,           // Slightly larger step for faster tracking
+            mu_cma: 0.005,      // Faster CMA acquisition
+            leakage: 0.9995,    // More leakage to prevent tap blowup on fading
+            update_threshold: 0.05, // Lower threshold: update even during mild fades
             cma_to_dd_threshold: 0.25,
             cma_min_symbols: 64,
         }
@@ -567,6 +567,18 @@ impl DFEConfig {
 /// 
 /// Once CMA converges (MSE drops below threshold), it automatically switches
 /// to DD mode for better steady-state performance.
+/// Per-symbol DFE telemetry snapshot
+#[derive(Clone, Debug)]
+pub struct DfeTelemetry {
+    pub symbol_idx: u64,
+    pub mse: f64,              // Running MSE (error_power_avg)
+    pub cma_cost: f64,         // CMA cost function average
+    pub out_mag_sq: f64,       // |equalizer output|² — should be ~1.0 for 8PSK
+    pub in_mag_sq: f64,        // |input|² — signal power before equalization
+    pub tap_energy: f64,       // Sum of |ff_coeffs|² — should be bounded
+    pub mode: u8,              // 0=CMA, 1=DD
+}
+
 pub struct DFE {
     config: DFEConfig,
     constellation: ConstellationType,
@@ -587,6 +599,10 @@ pub struct DFE {
     total_symbols: u64,
     error_power_avg: f64,
     cma_cost_avg: f64,
+    
+    // Telemetry
+    telemetry_enabled: bool,
+    telemetry: Vec<DfeTelemetry>,
 }
 
 impl DFE {
@@ -610,6 +626,8 @@ impl DFE {
             total_symbols: 0,
             error_power_avg: 1.0,  // Start high
             cma_cost_avg: 1.0,
+            telemetry_enabled: false,
+            telemetry: Vec::new(),
         };
 
         dfe.init_center_tap();
@@ -656,6 +674,23 @@ impl DFE {
         self.total_symbols = 0;
         self.error_power_avg = 1.0;
         self.cma_cost_avg = 1.0;
+        self.telemetry.clear();
+    }
+
+    /// Enable DFE telemetry recording
+    pub fn enable_telemetry(&mut self) {
+        self.telemetry_enabled = true;
+        self.telemetry.clear();
+    }
+    
+    /// Get recorded telemetry and clear buffer
+    pub fn take_telemetry(&mut self) -> Vec<DfeTelemetry> {
+        std::mem::take(&mut self.telemetry)
+    }
+    
+    /// Compute total feedforward tap energy
+    fn tap_energy(&self) -> f64 {
+        self.ff_coeffs.iter().map(|c| c.mag_sq()).sum()
     }
 
     /// Set constellation (for mid-frame switching)
@@ -716,8 +751,77 @@ impl DFE {
         if self.mode == EqMode::CMA && self.should_switch_to_dd() {
             self.mode = EqMode::DD;
         }
+        // Check for DD divergence -> fall back to CMA
+        if self.mode == EqMode::DD && self.should_fallback_to_cma() {
+            self.mode = EqMode::CMA;
+            self.cma_cost_avg = 1.0;  // Reset CMA statistics
+        }
 
         decision
+    }
+
+    /// Process one I/Q sample and return equalized I/Q (soft output)
+    /// Same as equalize() but returns the equalized complex value instead of hard decision
+    pub fn equalize_iq(&mut self, i: f64, q: f64) -> (f64, f64) {
+        let input = Complex::new(i, q);
+
+        // Push new sample into feedforward history
+        self.ff_history.rotate_right(1);
+        self.ff_history[0] = input;
+
+        // Compute equalizer output
+        let ff_out = self.compute_ff_output();
+        let fb_out = self.compute_fb_output();
+        let eq_out = ff_out - fb_out;
+
+        // Make symbol decision (still needed for feedback and adaptation)
+        let decision = self.constellation.iq_to_symbol(eq_out.re, eq_out.im);
+        let (dec_i, dec_q) = self.constellation.symbol_to_iq(decision);
+        let reference = Complex::new(dec_i, dec_q);
+
+        // Update coefficients based on mode
+        if input.mag_sq() > self.config.update_threshold {
+            match self.mode {
+                EqMode::CMA => self.update_cma(eq_out),
+                EqMode::DD => {
+                    let error = eq_out - reference;
+                    self.update_dd(error);
+                }
+            }
+        }
+
+        // Update feedback history with decision
+        self.fb_history.rotate_right(1);
+        self.fb_history[0] = decision;
+
+        // Track statistics
+        self.total_symbols += 1;
+        let dd_error = eq_out - reference;
+        self.error_power_avg = 0.99 * self.error_power_avg + 0.01 * dd_error.mag_sq();
+
+        if self.mode == EqMode::CMA && self.should_switch_to_dd() {
+            self.mode = EqMode::DD;
+        }
+        // Check for DD divergence -> fall back to CMA
+        if self.mode == EqMode::DD && self.should_fallback_to_cma() {
+            self.mode = EqMode::CMA;
+            self.cma_cost_avg = 1.0;
+        }
+
+        // Record telemetry if enabled
+        if self.telemetry_enabled {
+            self.telemetry.push(DfeTelemetry {
+                symbol_idx: self.total_symbols,
+                mse: self.error_power_avg,
+                cma_cost: self.cma_cost_avg,
+                out_mag_sq: eq_out.mag_sq(),
+                in_mag_sq: input.mag_sq(),
+                tap_energy: self.tap_energy(),
+                mode: if self.mode == EqMode::CMA { 0 } else { 1 },
+            });
+        }
+
+        (eq_out.re, eq_out.im)
     }
 
     /// Train on known symbol (supervised mode - fastest convergence)
@@ -808,6 +912,14 @@ impl DFE {
         // and DD error is reasonable
         self.cma_cost_avg < self.config.cma_to_dd_threshold 
             && self.error_power_avg < 0.5
+    }
+    
+    /// Detect DD divergence and fall back to CMA
+    fn should_fallback_to_cma(&self) -> bool {
+        // If MSE has risen above threshold, DD decisions are unreliable
+        // and error propagation is making things worse. Fall back to CMA
+        // which doesn't rely on decisions.
+        self.error_power_avg > 0.15
     }
 
     /// Get current mean squared error
@@ -1021,6 +1133,18 @@ impl UnifiedModulator {
 // Unified Demodulator with PLL and optional DFE
 // ============================================================================
 
+/// Per-symbol PLL telemetry snapshot
+#[derive(Clone, Debug)]
+pub struct PllTelemetry {
+    pub symbol_idx: usize,
+    pub phase: f64,           // NCO phase (radians)
+    pub freq: f64,            // NCO frequency correction (rad/sample)
+    pub integrator: f64,      // Loop filter integrator state
+    pub phase_error: f64,     // Raw phase error input to loop filter (rad)
+    pub mag_sq: f64,          // Signal magnitude squared (power)
+    pub lock_detect: f64,     // Lock detector: running avg of cos(8*phase_error), +1=locked, 0=unlocked
+}
+
 pub struct UnifiedDemodulator {
     // Configuration
     constellation: ConstellationType,
@@ -1041,6 +1165,24 @@ pub struct UnifiedDemodulator {
     pll_alpha: f64,
     pll_beta: f64,
     carrier_phase_inc: f64,
+    
+    // Block phase estimator: accumulate 8th-power products over N symbols
+    // before extracting phase. Gives sqrt(N) noise reduction.
+    phase_block_size: usize,       // N symbols per block (e.g. 32)
+    phase_accum_re: f64,           // Real part of sum((i+jq)^8)
+    phase_accum_im: f64,           // Imag part of sum((i+jq)^8)
+    phase_accum_count: usize,      // How many symbols accumulated so far
+    
+    // Lock detector: exponential moving average of cos(phase_error * 8)
+    // For 8PSK, if locked: phase_error ≈ 0 → cos(0) = 1.0
+    // If unlocked: phase_error is random → cos() averages to 0.0
+    lock_detect: f64,
+    lock_detect_alpha: f64,        // EMA smoothing factor
+    
+    // PLL telemetry recording
+    telemetry_enabled: bool,
+    telemetry: Vec<PllTelemetry>,
+    last_phase_error: f64,         // Most recent block phase error for telemetry
     
     // Symbol timing recovery
     timing_phase: usize,        // Which sample offset (0..sps-1) is symbol center
@@ -1066,17 +1208,22 @@ impl UnifiedDemodulator {
         let rrc_coeffs = generate_rrc_coeffs(sps);
         let filter_len = rrc_coeffs.len();
         
-        // PLL parameters - Proportional-only for Rayleigh fading channels
-        // With random phase wandering (Doppler fading), there's no constant frequency
-        // offset to track. An integrator accumulates random errors and drifts.
-        // Use higher proportional gain for fast phase tracking without integrator.
-        let loop_bw_hz = 30.0;  // Wider bandwidth for faster tracking
+        // PLL parameters - 2nd order Type 2 loop for carrier recovery
+        // 8th-power estimator for 8PSK: need narrow bandwidth to reject noise
+        // but wide enough to track residual frequency offset and Doppler.
+        //
+        // Design: BL (noise bandwidth) ≈ 3 Hz at 2400 baud
+        //   - Best AWGN performance with 8th-power estimator
+        //   - Acquires within ~100 symbols
+        //   - With integrator to track frequency offset with zero steady-state error
+        let loop_bw_hz = 3.0;
         let wn = 2.0 * PI * loop_bw_hz;
         let ts = 1.0 / symbol_rate as f64;
-        let zeta = 1.0;  // Critically damped
+        let zeta = 0.707;  // Butterworth (maximally flat)
         
+        // 2nd order loop gains (Gardner, "Phaselock Techniques" ch.4)
         let pll_alpha = 2.0 * zeta * wn * ts;
-        let pll_beta = 0.0;  // NO integrator - proportional only
+        let pll_beta = wn * wn * ts * ts;
         let carrier_phase_inc = 2.0 * PI * carrier_freq / sample_rate as f64;
         
         Self {
@@ -1094,6 +1241,20 @@ impl UnifiedDemodulator {
             pll_alpha,
             pll_beta,
             carrier_phase_inc,
+            // Block phase estimator: 8 symbols = 3.3ms at 2400 baud
+            // Gives 9 dB noise reduction over single-symbol estimation
+            // Update rate: 300 Hz — fast tracking with good noise rejection
+            phase_block_size: 8,
+            phase_accum_re: 0.0,
+            phase_accum_im: 0.0,
+            phase_accum_count: 0,
+            // Lock detector: EMA with ~50 symbol time constant
+            lock_detect: 0.0,
+            lock_detect_alpha: 0.02,
+            // Telemetry off by default (zero overhead unless enabled)
+            telemetry_enabled: false,
+            telemetry: Vec::new(),
+            last_phase_error: 0.0,
             timing_phase: 0,
             timing_acquired: false,
             equalizer: None,
@@ -1190,7 +1351,7 @@ impl UnifiedDemodulator {
     
     /// Compute phase error using 8th power loop (blind estimation)
     #[inline]
-    fn compute_phase_error(&self, i_rx: f64, q_rx: f64) -> f64 {
+    pub(crate) fn compute_phase_error(&self, i_rx: f64, q_rx: f64) -> f64 {
         let mut real = i_rx;
         let mut imag = q_rx;
         
@@ -1311,30 +1472,74 @@ impl UnifiedDemodulator {
             let fi = self.apply_filter(&self.i_history);
             let fq = self.apply_filter(&self.q_history);
             
-            // At symbol time: UPDATE PLL IMMEDIATELY, then emit symbol
+            // At symbol time: accumulate phase estimate, update PLL on block boundaries
             if i % self.sps == self.timing_phase {
                 if i >= skip_samples {
                     let mag_sq = fi * fi + fq * fq;
-                    if mag_sq > 0.01 {
-                        // Choose phase error estimator based on training mode
-                        let phase_error = if self.training_mode 
-                            && symbol_count < self.training_symbols.len() 
-                        {
-                            // Decision-directed: use known symbol for EXACT phase error
-                            // This is much more accurate than 8th-power (no noise amplification)
-                            let known = self.training_symbols[symbol_count];
-                            self.compute_phase_error_dd(fi, fq, known)
-                        } else {
-                            // Blind 8th-power estimation
-                            self.compute_phase_error(fi, fq)
-                        };
+                    
+                    // Accumulate 8th-power product for block phase estimation
+                    if mag_sq > 0.001 {
+                        // Compute (i + jq)^8 by cubing three times
+                        let mut real = fi;
+                        let mut imag = fq;
+                        for _ in 0..3 {
+                            let new_real = real * real - imag * imag;
+                            let new_imag = 2.0 * real * imag;
+                            real = new_real;
+                            imag = new_imag;
+                        }
+                        // Weight by magnitude to reduce noise contribution from weak symbols
+                        let weight = 1.0;
+                        self.phase_accum_re += real * weight;
+                        self.phase_accum_im += imag * weight;
+                    }
+                    self.phase_accum_count += 1;
+                    
+                    // On block boundary: extract phase and update PLL
+                    if self.phase_accum_count >= self.phase_block_size {
+                        let accum_mag = (self.phase_accum_re * self.phase_accum_re 
+                                       + self.phase_accum_im * self.phase_accum_im).sqrt();
                         
-                        // PLL loop filter - 2nd order Type 2
-                        // pll_freq is SET by loop filter output, not accumulated
-                        self.pll_integrator += phase_error;
-                        self.pll_freq = (self.pll_alpha * phase_error 
-                                       + self.pll_beta * self.pll_integrator) / self.sps as f64;
-                        self.pll_freq = self.pll_freq.clamp(-max_freq_offset, max_freq_offset);
+                        if accum_mag > 1e-12 {
+                            let phase_error = self.phase_accum_im.atan2(self.phase_accum_re) / 8.0;
+                            self.last_phase_error = phase_error;
+                            
+                            // Lock detector: EMA of cos(8 * phase_error)
+                            // If locked, phase_error ≈ 0, cos(0) = 1.0
+                            // If unlocked, phase_error is random, cos averages to 0
+                            let lock_indicator = (8.0 * phase_error).cos();
+                            self.lock_detect = self.lock_detect * (1.0 - self.lock_detect_alpha) 
+                                             + lock_indicator * self.lock_detect_alpha;
+                            
+                            // PLL loop filter - 2nd order Type 2
+                            // Scale gains by block size: we get one update per N symbols
+                            // with sqrt(N) less noise, so multiply gains by N to maintain
+                            // constant loop bandwidth regardless of block size.
+                            let n = self.phase_block_size as f64;
+                            self.pll_integrator += phase_error * n;
+                            self.pll_integrator = self.pll_integrator.clamp(-2.0 * PI, 2.0 * PI);
+                            self.pll_freq = (self.pll_alpha * n * phase_error 
+                                           + self.pll_beta * self.pll_integrator) / self.sps as f64;
+                            self.pll_freq = self.pll_freq.clamp(-max_freq_offset, max_freq_offset);
+                        }
+                        
+                        // Reset accumulator for next block
+                        self.phase_accum_re = 0.0;
+                        self.phase_accum_im = 0.0;
+                        self.phase_accum_count = 0;
+                    }
+                    
+                    // Record telemetry (every symbol, cheap when disabled)
+                    if self.telemetry_enabled {
+                        self.telemetry.push(PllTelemetry {
+                            symbol_idx: symbol_count,
+                            phase: self.pll_phase,
+                            freq: self.pll_freq * self.sps as f64,  // Convert to rad/symbol
+                            integrator: self.pll_integrator,
+                            phase_error: self.last_phase_error,
+                            mag_sq,
+                            lock_detect: self.lock_detect,
+                        });
                     }
                     
                     iq_out.push((fi, fq));
@@ -1389,6 +1594,37 @@ impl UnifiedDemodulator {
         }
     }
     
+    /// Demodulate to equalized I/Q (soft output for soft Walsh decoder)
+    /// Runs DFE equalizer if present, otherwise returns raw I/Q
+    pub fn demodulate_eq_iq(&mut self, samples: &[i16]) -> Vec<(f64, f64)> {
+        let iq = self.demodulate_iq(samples);
+        
+        match &mut self.equalizer {
+            Some(eq) => {
+                iq.into_iter()
+                    .map(|(i, q)| eq.equalize_iq(i, q))
+                    .collect()
+            }
+            None => iq
+        }
+    }
+    
+    /// Enable DFE telemetry recording
+    pub fn enable_dfe_telemetry(&mut self) {
+        if let Some(eq) = &mut self.equalizer {
+            eq.enable_telemetry();
+        }
+    }
+    
+    /// Get DFE telemetry and clear buffer
+    pub fn take_dfe_telemetry(&mut self) -> Vec<DfeTelemetry> {
+        if let Some(eq) = &mut self.equalizer {
+            eq.take_telemetry()
+        } else {
+            Vec::new()
+        }
+    }
+    
     /// Reset all state including PLL
     pub fn reset(&mut self) {
         for x in &mut self.i_history { *x = 0.0; }
@@ -1396,6 +1632,12 @@ impl UnifiedDemodulator {
         self.pll_phase = 0.0;
         self.pll_freq = 0.0;
         self.pll_integrator = 0.0;
+        self.phase_accum_re = 0.0;
+        self.phase_accum_im = 0.0;
+        self.phase_accum_count = 0;
+        self.lock_detect = 0.0;
+        self.last_phase_error = 0.0;
+        self.telemetry.clear();
         self.timing_phase = 0;
         self.timing_acquired = false;
         self.training_index = 0;
@@ -1403,6 +1645,40 @@ impl UnifiedDemodulator {
         if let Some(eq) = &mut self.equalizer {
             eq.reset();
         }
+    }
+    
+    /// Enable PLL telemetry recording
+    pub fn enable_telemetry(&mut self) {
+        self.telemetry_enabled = true;
+        self.telemetry.clear();
+    }
+    
+    /// Disable PLL telemetry recording
+    pub fn disable_telemetry(&mut self) {
+        self.telemetry_enabled = false;
+    }
+    
+    /// Get recorded telemetry and clear buffer
+    pub fn take_telemetry(&mut self) -> Vec<PllTelemetry> {
+        std::mem::take(&mut self.telemetry)
+    }
+    
+    /// Get current lock detector value: +1.0 = locked, 0.0 = unlocked
+    pub fn lock_detect(&self) -> f64 {
+        self.lock_detect
+    }
+    
+    /// Set the phase estimator block size (number of symbols averaged)
+    pub fn set_phase_block_size(&mut self, size: usize) {
+        self.phase_block_size = size.max(1);
+        self.phase_accum_re = 0.0;
+        self.phase_accum_im = 0.0;
+        self.phase_accum_count = 0;
+    }
+    
+    /// Get current phase block size
+    pub fn phase_block_size(&self) -> usize {
+        self.phase_block_size
     }
     
     /// Reset just the PLL (keep filter and equalizer state)

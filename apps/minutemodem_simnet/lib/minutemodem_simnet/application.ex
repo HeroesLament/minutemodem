@@ -17,13 +17,17 @@ defmodule MinutemodemSimnet.Application do
           initial_state: %{}
         ]]}
       },
+      # pg scope for tick distribution
+      %{id: :simnet_pg, start: {:pg, :start_link, [:simnet_pg]}},
       # RX subscription registry
       MinutemodemSimnet.Routing.RxRegistry,
-      # Horde distributed supervision
-      MinutemodemSimnet.Channel.Registry,
-      MinutemodemSimnet.Channel.Supervisor,
-      # Router with persistent channel cache
+      # Horde distributed supervision for RxCombiners
+      MinutemodemSimnet.RxCombiner.Registry,
+      MinutemodemSimnet.RxCombiner.Supervisor,
+      # Router (stateless fan-out)
       MinutemodemSimnet.Routing.Router,
+      # Rig attachment lifecycle (serialized GenServer)
+      MinutemodemSimnet.Rig.Attachment,
       # Highlander singleton control server
       MinutemodemSimnet.Control.Supervisor
     ]

@@ -483,6 +483,13 @@ defmodule MinuteModemCore.Modem.RxFSM do
     {data, nil}  # Wait for WID
   end
 
+  # Reject WIDs with out-of-range or unsupported waveforms (e.g. garbled from collisions).
+  # Waveform 0 is walsh (no data mode); 13+ are undefined in the modulation table.
+  defp handle_phy_event({:wid_decoded, %{waveform: wf}}, data, _state) when wf not in 1..12 do
+    Logger.debug("[Modem.RxFSM] Discarding invalid waveform #{wf} from WID decode")
+    {data, nil}
+  end
+
   defp handle_phy_event({:wid_decoded, wid}, data, _state) do
     Logger.info("[Modem.RxFSM] WID decoded: waveform=#{wid.waveform}, interleaver=#{wid.interleaver}, K=#{wid.constraint_length}")
 
@@ -581,6 +588,11 @@ defmodule MinuteModemCore.Modem.RxFSM do
 
   defp handle_phy_event({:channel_estimate, _est}, data, _state) do
     # Could emit for debugging/monitoring
+    {data, nil}
+  end
+
+  defp handle_phy_event({:error, {:preamble_decode_failed, _} = _reason}, data, _state) do
+    # Normal on noise floor — don't spam logs
     {data, nil}
   end
 

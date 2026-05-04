@@ -22,7 +22,8 @@ defmodule MinuteModemUI.Scenes.UI do
         {:rigs, nil},
         {:nets, nil},
         {:callsigns, nil},
-        {:config, nil}
+        {:config, nil},
+        {:license, nil}
       ]
     }
   end
@@ -96,5 +97,6 @@ defmodule MinuteModemUI.Scenes.UI do
   defp page_title(:nets), do: "Nets"
   defp page_title(:callsigns), do: "Callsigns"
   defp page_title(:config), do: "Config"
+  defp page_title(:license), do: "License"
   defp page_title(other), do: to_string(other)
 end

@@ -54,9 +54,9 @@ defmodule MinuteModemCore.ALE.Waveform.DeepWale do
 
   ## Options
   - `:tuner_time_ms` - TLC duration for radio tuning (default: 0, max varies)
-  - `:capture_probe_count` - Number of capture probes for async (default: 1)
+  - `:capture_probe_count` - Number of capture probes (default: 1)
   - `:preamble_count` - Number of preamble repetitions (default: 1, max: 16)
-  - `:async` - true for async call (includes capture probe), false for sync
+  - `:include_probe` - true to prepend capture probe + TLC for cold-start receivers (default: true)
   - `:more_pdus` - true if M bit should be set (more PDUs follow)
 
   Returns list of 8-PSK symbols (0-7).
@@ -65,14 +65,14 @@ defmodule MinuteModemCore.ALE.Waveform.DeepWale do
     tuner_time_ms = Keyword.get(opts, :tuner_time_ms, 0)
     capture_probe_count = Keyword.get(opts, :capture_probe_count, 1)
     preamble_count = Keyword.get(opts, :preamble_count, 1) |> min(16)
-    async = Keyword.get(opts, :async, true)
+    include_probe = Keyword.get(opts, :include_probe, Keyword.get(opts, :async, true))
     more_pdus = Keyword.get(opts, :more_pdus, false)
 
     # 1. TLC blocks (tuner adjust time)
     tlc_symbols = build_tlc(tuner_time_ms)
 
-    # 2. Capture probe (async only)
-    capture_symbols = if async do
+    # 2. Capture probe (for cold-start receivers)
+    capture_symbols = if include_probe do
       Walsh.capture_probe()
       |> List.duplicate(capture_probe_count)
       |> List.flatten()
@@ -98,12 +98,12 @@ defmodule MinuteModemCore.ALE.Waveform.DeepWale do
     tuner_time_ms = Keyword.get(opts, :tuner_time_ms, 0)
     capture_probe_count = Keyword.get(opts, :capture_probe_count, 1)
     preamble_count = Keyword.get(opts, :preamble_count, 1) |> min(16)
-    async = Keyword.get(opts, :async, true)
+    include_probe = Keyword.get(opts, :include_probe, Keyword.get(opts, :async, true))
     more_pdus = Keyword.get(opts, :more_pdus, false)
 
     tlc_symbols = build_tlc(tuner_time_ms)
 
-    capture_symbols = if async do
+    capture_symbols = if include_probe do
       Walsh.capture_probe()
       |> List.duplicate(capture_probe_count)
       |> List.flatten()
@@ -194,6 +194,8 @@ defmodule MinuteModemCore.ALE.Waveform.DeepWale do
   end
 
   defp encode_data_with_scrambler(pdu_binary, scrambler) do
+    require Logger
+
     # 1. Convolutional encode (rate 1/2) with flush
     dibits = Encoding.conv_encode_with_flush(pdu_binary)
 
@@ -205,6 +207,8 @@ defmodule MinuteModemCore.ALE.Waveform.DeepWale do
 
     # 4. Group into quad-bits (4 bits each)
     quadbits = bits_to_quadbits(bits)
+
+    Logger.info("[DeepWale ENC] #{length(quadbits)} quadbits, first 6: #{inspect(Enum.take(quadbits, 6))}")
 
     # 5. Map each quad-bit to Walsh-16 sequence (64 symbols)
     walsh_symbols = Enum.flat_map(quadbits, &Walsh.walsh_16/1)
@@ -241,6 +245,7 @@ defmodule MinuteModemCore.ALE.Waveform.DeepWale do
   Pipeline: Symbols → Descramble → Walsh correlate → Quad-bits → Bits → Deinterleave → Viterbi
   """
   def decode_data(symbols, scrambler \\ nil) do
+    require Logger
     scrambler = scrambler || Scrambler.Deep.new()
 
     # 1. Descramble
@@ -250,14 +255,33 @@ defmodule MinuteModemCore.ALE.Waveform.DeepWale do
     quadbits =
       descrambled
       |> Enum.chunk_every(64)
-      |> Enum.map(fn chunk ->
+      |> Enum.with_index()
+      |> Enum.map(fn {chunk, idx} ->
         if length(chunk) == 64 do
-          {quadbit, _score} = Walsh.correlate_walsh_16(chunk)
+          {quadbit, score} = Walsh.correlate_walsh_16(chunk)
+          # Log blocks with imperfect scores
+          if score < 64 do
+            Logger.info("[DeepWale] Block #{idx}: qb=#{quadbit} score=#{score}/64 ***")
+          end
           quadbit
         else
           0
         end
       end)
+
+    # Summary: count of perfect vs imperfect blocks
+    all_scores = descrambled
+      |> Enum.chunk_every(64)
+      |> Enum.map(fn chunk ->
+        if length(chunk) == 64 do
+          {_qb, score} = Walsh.correlate_walsh_16(chunk)
+          score
+        else
+          0
+        end
+      end)
+    perfect = Enum.count(all_scores, &(&1 == 64))
+    Logger.info("[DeepWale] #{length(all_scores)} blocks: #{perfect} perfect, #{length(all_scores) - perfect} imperfect")
 
     # 3. Convert quad-bits to bits
     bits = Enum.flat_map(quadbits, fn qb ->
@@ -291,10 +315,10 @@ defmodule MinuteModemCore.ALE.Waveform.DeepWale do
     tuner_time_ms = Keyword.get(opts, :tuner_time_ms, 0)
     capture_probe_count = Keyword.get(opts, :capture_probe_count, 1)
     preamble_count = Keyword.get(opts, :preamble_count, 1)
-    async = Keyword.get(opts, :async, true)
+    include_probe = Keyword.get(opts, :include_probe, Keyword.get(opts, :async, true))
 
     tlc_symbols = div(tuner_time_ms * @symbol_rate, 1000)
-    capture_symbols = if async, do: 96 * capture_probe_count, else: 0
+    capture_symbols = if include_probe, do: 96 * capture_probe_count, else: 0
     preamble_symbols = 576 * preamble_count  # 18 di-bits × 32 chips
 
     # Data: PDU → conv encode → interleave → quad-bits → Walsh-16

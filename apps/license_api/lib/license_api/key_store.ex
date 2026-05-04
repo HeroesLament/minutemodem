@@ -26,6 +26,13 @@ defmodule LicenseAPI.KeyStore do
   end
 
   @doc """
+  Sign an assertion payload. Returns the full assertion string (MMA-...).
+  """
+  def sign_assertion(payload) when is_binary(payload) do
+    GenServer.call(__MODULE__, {:sign_assertion, payload})
+  end
+
+  @doc """
   Returns the public key as a base64url-encoded string.
   Used during provisioning to give you the value to bake into client builds.
   """
@@ -69,6 +76,15 @@ defmodule LicenseAPI.KeyStore do
   def handle_call({:sign, payload}, _from, %{private_key: priv} = state) do
     key_string = LicenseCore.Key.sign(payload, priv)
     {:reply, {:ok, key_string}, state}
+  end
+
+  def handle_call({:sign_assertion, _payload}, _from, %{private_key: nil} = state) do
+    {:reply, {:error, :not_provisioned}, state}
+  end
+
+  def handle_call({:sign_assertion, payload}, _from, %{private_key: priv} = state) do
+    assertion_string = LicenseCore.Assertion.sign(payload, priv)
+    {:reply, {:ok, assertion_string}, state}
   end
 
   def handle_call(:public_key_b64, _from, %{public_key: nil} = state) do

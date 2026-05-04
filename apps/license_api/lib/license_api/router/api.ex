@@ -359,11 +359,97 @@ defmodule LicenseAPI.Router.API do
               os: a.machine_os,
               arch: a.machine_arch,
               ip: a.ip_address,
+              status: a.status,
               first_seen: DateTime.to_iso8601(a.inserted_at),
               last_seen: DateTime.to_iso8601(a.updated_at)
             }
           end)
       })
+    end
+  end
+
+  @doc """
+  Generate a signed assertion for a license.
+  Body: {"machine_id"} — use "*" for offline/wildcard.
+  Scope: admin
+  """
+  post "/licenses/:id/assert" do
+    conn = RequireScope.call(conn, "admin")
+
+    unless conn.halted do
+      machine_id = conn.body_params["machine_id"] || "*"
+
+      case Repo.get(License, id) do
+        nil ->
+          json(conn, 404, %{error: "not_found"})
+
+        license ->
+          key_hash = :crypto.hash(:sha256, license.key_string) |> Base.encode16(case: :lower)
+          assertion_expires = Date.add(Date.utc_today(), 365)
+
+          payload =
+            "#{key_hash}|#{machine_id}|#{Date.to_iso8601(Date.utc_today())}|#{Date.to_iso8601(assertion_expires)}"
+
+          case LicenseAPI.KeyStore.sign_assertion(payload) do
+            {:ok, assertion_string} ->
+              # Record the activation
+              case Repo.get_by(Activation, key_hash: key_hash, machine_id: machine_id) do
+                nil ->
+                  %Activation{}
+                  |> Activation.changeset(%{
+                    key_hash: key_hash,
+                    machine_id: machine_id,
+                    assertion_string: assertion_string,
+                    status: "active",
+                    license_id: license.id
+                  })
+                  |> Repo.insert()
+
+                existing ->
+                  existing
+                  |> Ecto.Changeset.change(%{
+                    assertion_string: assertion_string,
+                    updated_at: DateTime.utc_now() |> DateTime.truncate(:second)
+                  })
+                  |> Repo.update()
+              end
+
+              json(conn, 200, %{
+                assertion: assertion_string,
+                expires: Date.to_iso8601(assertion_expires),
+                machine_id: machine_id
+              })
+
+            {:error, :not_provisioned} ->
+              json(conn, 503, %{error: "server_not_provisioned"})
+          end
+      end
+    end
+  end
+
+  @doc """
+  Set max activations (seat count) for a license.
+  Body: {"max_activations": 3} or {"max_activations": null} for unlimited.
+  Scope: admin
+  """
+  post "/licenses/:id/seats" do
+    conn = RequireScope.call(conn, "admin")
+
+    unless conn.halted do
+      case Repo.get(License, id) do
+        nil ->
+          json(conn, 404, %{error: "not_found"})
+
+        license ->
+          max = conn.body_params["max_activations"]
+
+          license
+          |> Ecto.Changeset.change(max_activations: max)
+          |> Repo.update()
+
+          label = if max, do: "#{max}", else: "unlimited"
+          json(conn, 200, %{status: "updated", max_activations: label})
+      end
     end
   end
 
@@ -617,6 +703,7 @@ defmodule LicenseAPI.Router.API do
       tier: l.tier,
       expires: Date.to_iso8601(l.expires),
       status: l.status,
+      max_activations: l.max_activations,
       notes: l.notes,
       issued_at: DateTime.to_iso8601(l.inserted_at)
     }

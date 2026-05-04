@@ -177,12 +177,12 @@ mod rrc_filter_tests {
             let idx_minus = center - k * sps;
             
             if idx_plus < rc_len {
-                let val = rc[idx_plus] / rc[center];  // Normalize to peak
+                let val: f64 = rc[idx_plus] / rc[center];  // Normalize to peak
                 assert!(val.abs() < 0.05, 
                     "RC not zero at +{} symbols: {}", k, val);
             }
             if idx_minus < rc_len {
-                let val = rc[idx_minus] / rc[center];
+                let val: f64 = rc[idx_minus] / rc[center];
                 assert!(val.abs() < 0.05, 
                     "RC not zero at -{} symbols: {}", k, val);
             }
@@ -661,6 +661,174 @@ mod ale_tests {
             // Should be high positive or high negative (phase ambiguity)
             assert!(corr.abs() >= 28, 
                 "Capture probe correlation too low: {}", corr);
+        }
+    }
+}
+
+// =============================================================================
+// PART 6: DFE Equalizer Tests
+// =============================================================================
+
+#[cfg(test)]
+mod dfe_tests {
+    use super::*;
+
+    /// Test DFE on clean PSK8 I/Q - should pass through with ~0% SER
+    #[test]
+    fn test_dfe_clean_passthrough() {
+        let constellation = ConstellationType::Psk8;
+        let config = DFEConfig::hf_skywave();
+        let mut dfe = DFE::new(config, constellation);
+
+        // Generate 200 PSK8 symbols and their I/Q
+        let symbols: Vec<u8> = (0..200).map(|i| (i * 3 + 7) as u8 % 8).collect();
+        
+        let mut errors = 0;
+        let mut first_errors: Vec<(usize, u8, u8)> = Vec::new();
+        for (idx, &sym) in symbols.iter().enumerate() {
+            let (i, q) = constellation.symbol_to_iq(sym);
+            let out = dfe.equalize(i, q);
+            if out != sym {
+                errors += 1;
+                if first_errors.len() < 20 {
+                    first_errors.push((idx, sym, out));
+                }
+            }
+        }
+
+        let ser = errors as f64 / symbols.len() as f64;
+        println!("DFE clean passthrough: {}/{} errors, SER={:.2}%", 
+            errors, symbols.len(), ser * 100.0);
+        println!("Mode after: {:?}, MSE: {:.6}", dfe.mode(), dfe.mse());
+        for (idx, expected, got) in &first_errors {
+            println!("  Error at {}: expected {} got {}", idx, expected, got);
+        }
+        
+        // On clean signal, DFE should converge quickly
+        // Allow some errors during initial convergence (first ~30 symbols for 21 FF taps)
+        assert!(errors < 35, "DFE clean passthrough has too many errors: {}", errors);
+    }
+
+    /// Test DFE training on clean PSK8 I/Q
+    #[test]
+    fn test_dfe_training_clean() {
+        let constellation = ConstellationType::Psk8;
+        let config = DFEConfig::hf_skywave();
+        let mut dfe = DFE::new(config, constellation);
+
+        // Generate symbols
+        let symbols: Vec<u8> = (0..500).map(|i| (i * 3 + 7) as u8 % 8).collect();
+        
+        // Train on first 100 symbols
+        let mut train_errors = 0;
+        for (idx, &sym) in symbols[..100].iter().enumerate() {
+            let (i, q) = constellation.symbol_to_iq(sym);
+            let out = dfe.train(i, q, sym);
+            if out != sym {
+                train_errors += 1;
+                if train_errors <= 5 {
+                    println!("  Train error at {}: expected {} got {}", idx, sym, out);
+                }
+            }
+        }
+        println!("DFE training phase: {}/100 errors, mode: {:?}, MSE: {:.6}", 
+            train_errors, dfe.mode(), dfe.mse());
+
+        // Now equalize remaining symbols
+        let mut eq_errors = 0;
+        for (idx, &sym) in symbols[100..].iter().enumerate() {
+            let (i, q) = constellation.symbol_to_iq(sym);
+            let out = dfe.equalize(i, q);
+            if out != sym {
+                eq_errors += 1;
+                if eq_errors <= 5 {
+                    println!("  Eq error at {}: expected {} got {}", idx + 100, sym, out);
+                }
+            }
+        }
+        let ser = eq_errors as f64 / 400.0;
+        println!("DFE after training: {}/400 errors, SER={:.2}%, mode: {:?}", 
+            eq_errors, ser * 100.0, dfe.mode());
+        
+        assert!(eq_errors < 5, "DFE after training should be near-perfect: {} errors", eq_errors);
+    }
+
+    /// Test full demod+DFE chain on clean signal (what H5a actually does)
+    #[test]
+    fn test_full_demod_dfe_clean() {
+        let constellation = ConstellationType::Psk8;
+        let sample_rate = 9600u32;
+        let symbol_rate = 2400u32;
+        let carrier_freq = 1800.0;
+
+        // Modulate 200 symbols
+        let symbols: Vec<u8> = (0..200).map(|i| (i * 3 + 7) as u8 % 8).collect();
+        let mut modulator = UnifiedModulator::new(constellation, sample_rate, symbol_rate, carrier_freq);
+        let samples = modulator.modulate(&symbols);
+        let flush = modulator.flush();
+        let all_samples: Vec<i16> = samples.into_iter().chain(flush.into_iter()).collect();
+
+        // Demod WITHOUT equalizer
+        let mut demod_basic = UnifiedDemodulator::new(constellation, sample_rate, symbol_rate, carrier_freq);
+        let rx_basic = demod_basic.demodulate(&all_samples);
+        
+        // Demod WITH HF equalizer
+        let mut demod_hf = UnifiedDemodulator::with_hf_equalizer(constellation, sample_rate, symbol_rate, carrier_freq);
+        let rx_hf = demod_hf.demodulate(&all_samples);
+
+        // Count errors (skip first 12 symbols for filter warmup)
+        let skip = 12;
+        let mut basic_errors = 0;
+        let mut hf_errors = 0;
+        let check_len = symbols.len().min(rx_basic.len() - skip).min(rx_hf.len() - skip);
+        
+        for idx in 0..check_len {
+            if rx_basic[idx + skip] != symbols[idx] {
+                basic_errors += 1;
+            }
+            if rx_hf[idx + skip] != symbols[idx] {
+                hf_errors += 1;
+                if hf_errors <= 10 {
+                    println!("  HF error at {}: expected {} got {}", idx, symbols[idx], rx_hf[idx + skip]);
+                }
+            }
+        }
+
+        println!("Basic demod: {}/{} errors ({:.2}%)", basic_errors, check_len, basic_errors as f64 / check_len as f64 * 100.0);
+        println!("HF demod:    {}/{} errors ({:.2}%)", hf_errors, check_len, hf_errors as f64 / check_len as f64 * 100.0);
+        println!("HF eq mode: {:?}, MSE: {:?}", demod_hf.equalizer_mode(), demod_hf.equalizer_mse());
+        
+        // Basic should be perfect on clean signal
+        assert_eq!(basic_errors, 0, "Basic demod should be perfect on clean signal");
+        // HF should also be near-perfect
+        assert!(hf_errors < 15, "HF demod should be near-perfect on clean signal: {} errors", hf_errors);
+    }
+
+    /// Minimal test: trace first few symbols through small DFE
+    #[test]
+    fn test_dfe_single_symbol_trace() {
+        let constellation = ConstellationType::Psk8;
+        let config = DFEConfig {
+            ff_taps: 5,
+            fb_taps: 2,
+            mu: 0.02,
+            mu_cma: 0.003,
+            leakage: 0.9999,
+            update_threshold: 0.15,
+            cma_to_dd_threshold: 0.25,
+            cma_min_symbols: 64,
+        };
+        let mut dfe = DFE::new(config, constellation);
+
+        println!("DFE config: ff_taps=5, center=2");
+        
+        // Feed 10 symbols and trace outputs
+        for sym in 0..10u8 {
+            let s = sym % 8;
+            let (i, q) = constellation.symbol_to_iq(s);
+            let out = dfe.equalize(i, q);
+            println!("step {}: in=sym{} ({:.3},{:.3}) -> out=sym{} mode={:?}", 
+                sym, s, i, q, out, dfe.mode());
         }
     }
 }

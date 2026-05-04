@@ -21,10 +21,10 @@ defmodule MinuteModemCore.ALE.Waveform do
 
   ## Usage
 
-      # Assemble an async call frame with Deep WALE
+      # Assemble a frame with capture probe for cold-start receivers
       symbols = Waveform.assemble_frame(pdu_binary,
         waveform: :deep,
-        async: true,
+        include_probe: true,
         tuner_time_ms: 40,
         capture_probe_count: 2
       )
@@ -37,9 +37,15 @@ defmodule MinuteModemCore.ALE.Waveform do
 
   @type waveform :: :deep | :fast
 
+  # Maximum preamble dibit errors tolerated during waveform detection.
+  # Deep: 3/14 errors → 78.6% match, still unambiguous (P_false ≈ 3e-6)
+  # Fast: 1/5 errors → 80% match (P_false ≈ 4e-3, but combined with avg_score threshold)
+  @max_preamble_errors 3
+  @max_fast_preamble_errors 1
+
   @type frame_opts :: [
     waveform: waveform(),
-    async: boolean(),
+    include_probe: boolean(),
     tuner_time_ms: non_neg_integer(),
     capture_probe_count: pos_integer(),
     preamble_count: pos_integer(),
@@ -55,7 +61,7 @@ defmodule MinuteModemCore.ALE.Waveform do
 
   ## Options
   - `:waveform` - `:deep` or `:fast` (default: `:deep`)
-  - `:async` - true for async call with capture probe (default: true)
+  - `:include_probe` - true to prepend capture probe + TLC for cold-start receivers (default: true)
   - `:tuner_time_ms` - TLC duration for radio tuning (default: 0)
   - `:capture_probe_count` - Number of capture probe repetitions (default: 1)
   - `:preamble_count` - Preamble repetitions, Deep only (default: 1)
@@ -184,7 +190,13 @@ defmodule MinuteModemCore.ALE.Waveform do
     decoded_dibits = Enum.map(decoded, fn {d, _} -> d end)
     avg_score = decoded |> Enum.map(fn {_, s} -> s end) |> Enum.sum() |> div(14)
 
-    if decoded_dibits == fixed_dibits and avg_score > 20 do
+    # Allow up to @max_preamble_errors mismatched dibits for multipath robustness.
+    # 14 fixed Walsh blocks — exact match is too fragile under fading channels.
+    # With 4 possible dibits, P(random match of 11+/14) ≈ 3e-6, so this is safe.
+    matches = Enum.zip(decoded_dibits, fixed_dibits) |> Enum.count(fn {a, b} -> a == b end)
+    errors = 14 - matches
+
+    if errors <= @max_preamble_errors and avg_score > 12 do
       # Decode exceptional di-bits
       exceptional = symbols
         |> Enum.slice(14 * 32, 4 * 32)
@@ -201,7 +213,8 @@ defmodule MinuteModemCore.ALE.Waveform do
           waveform: :deep,
           more_pdus: m_bit == 1,
           preamble_count: Bitwise.bor(Bitwise.bsl(c1, 2), c0),
-          correlation_score: avg_score
+          correlation_score: avg_score,
+          preamble_errors: errors
         }}
       else
         {:error, :wrong_waveform_id}
@@ -227,7 +240,10 @@ defmodule MinuteModemCore.ALE.Waveform do
     decoded_dibits = Enum.map(decoded, fn {d, _} -> d end)
     avg_score = decoded |> Enum.map(fn {_, s} -> s end) |> Enum.sum() |> div(5)
 
-    if decoded_dibits == fixed_dibits and avg_score > 20 do
+    matches = Enum.zip(decoded_dibits, fixed_dibits) |> Enum.count(fn {a, b} -> a == b end)
+    fast_errors = 5 - matches
+
+    if fast_errors <= @max_fast_preamble_errors and avg_score > 12 do
       exceptional = symbols
         |> Enum.slice(5 * 32, 4 * 32)
         |> Enum.chunk_every(32)

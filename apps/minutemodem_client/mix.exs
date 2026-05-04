@@ -13,15 +13,16 @@ defmodule MinuteModemClient.MixProject do
 
   def application do
     [
+      mod: {MinuteModemClient.Application, []},
       extra_applications: [:logger, :wx]
-      # No mod: - start manually via MinuteModemClient.start()
     ]
   end
 
   defp deps do
     [
-      {:wx_mvu, "~> 0.1"},
-      {:gen_state_machine, "~> 3.0"}
+      {:wx_mvu, path: "C:/build/wx_mvu", override: true},
+      {:gen_state_machine, "~> 3.0"},
+      {:license_ui, in_umbrella: true}
     ]
   end
 end

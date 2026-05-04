@@ -71,7 +71,7 @@ defmodule MinuteModemCore.Rig.SimnetBridge do
   Samples should be f32 native format.
   """
   def tx(rig_id, samples) when is_binary(samples) do
-    GenServer.call(via(rig_id), {:tx, samples})
+    GenServer.cast(via(rig_id), {:tx, samples})
   end
 
   @doc """
@@ -91,7 +91,7 @@ defmodule MinuteModemCore.Rig.SimnetBridge do
     state = %__MODULE__{
       rig_id: rig_id,
       sample_rate: 9600,
-      block_samples: 96,  # 2ms at 48kHz
+      block_samples: 192,  # 20ms at 9600Hz
       current_freq_hz: 7_300_000,  # Default 40m
       tx_sample_index: 0,
       attached: false
@@ -119,22 +119,26 @@ defmodule MinuteModemCore.Rig.SimnetBridge do
 
   @impl true
   def handle_cast({:set_frequency, freq_hz}, state) do
+    # Notify simnet combiner of frequency change
+    if state.attached do
+      SimnetClient.set_rx_frequency(state.rig_id, freq_hz)
+    end
     {:noreply, %{state | current_freq_hz: freq_hz}}
   end
 
   @impl true
-  def handle_call({:tx, _samples}, _from, %{attached: false} = state) do
-    {:reply, {:error, :not_attached}, state}
+  def handle_cast({:tx, _samples}, %{attached: false} = state) do
+    {:noreply, state}
   end
 
   @impl true
-  def handle_call({:tx, samples}, _from, state) do
-    result = do_tx(state.rig_id, state.tx_sample_index, samples, state.current_freq_hz)
+  def handle_cast({:tx, samples}, state) do
+    do_tx(state.rig_id, state.tx_sample_index, samples, state.current_freq_hz)
 
     n_samples = byte_size(samples) |> div(4)  # f32 = 4 bytes
     new_index = state.tx_sample_index + n_samples
 
-    {:reply, result, %{state | tx_sample_index: new_index}}
+    {:noreply, %{state | tx_sample_index: new_index}}
   end
 
   @impl true
@@ -186,7 +190,7 @@ defmodule MinuteModemCore.Rig.SimnetBridge do
 
     %{
       sample_rates: [9600],
-      block_ms: [2],
+      block_ms: [20],
       representation: [:audio_f32],
       location: location,
       antenna: antenna,
@@ -219,22 +223,28 @@ defmodule MinuteModemCore.Rig.SimnetBridge do
     SimnetClient.tx(rig_id, t0, samples, freq_hz: freq_hz)
   end
 
-  # Convert f32 samples from simnet to s16 for receiver
-  # Simnet's Watterson channel model can produce samples > 1.0 due to
-  # multipath constructive interference and noise. We normalize to prevent
-  # clipping which corrupts the demodulated symbols.
+  # Convert f32 samples from simnet to s16 for receiver.
+  #
+  # Uses a FIXED scale factor (f32 × 32767 → s16) with hard clipping
+  # for samples > 1.0. This preserves the absolute amplitude relationship
+  # between signal and noise, which is critical for the ALE receiver's
+  # energy-based signal detection (squelch).
+  #
+  # The previous per-chunk normalization (scaling each chunk so peak = 0.9)
+  # destroyed this relationship — noise-only chunks got amplified to fill
+  # the s16 range, making them indistinguishable from signal.
+  #
+  # Samples > 1.0 from Watterson multipath constructive interference are
+  # hard-clipped. This is acceptable because:
+  # 1. It only affects peak samples, not the bulk of the waveform
+  # 2. The 8-PSK demodulator uses phase, not amplitude
+  # 3. Occasional clipping is less harmful than destroying SNR information
   defp f32_to_s16_list(binary) do
-    # First pass: extract samples and find peak amplitude
-    samples = for <<sample::float-32-native <- binary>>, do: sample
-    peak = samples |> Enum.map(&abs/1) |> Enum.max(fn -> 1.0 end)
-
-    # Normalize if peak > 1.0 to prevent clipping
-    # Target 0.9 to leave some headroom
-    scale = if peak > 0.9, do: 0.9 / peak, else: 1.0
-
-    Enum.map(samples, fn sample ->
-      round(sample * scale * 32767.0)
-    end)
+    for <<sample::float-32-native <- binary>> do
+      # Fixed scale with hard clip at s16 boundaries
+      scaled = round(sample * 32767.0)
+      max(-32768, min(32767, scaled))
+    end
   end
 
   defp broadcast_rx_audio(rig_id, from_rig, samples, metadata) do

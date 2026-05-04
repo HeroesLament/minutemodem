@@ -9,6 +9,7 @@ use std::sync::Mutex;
 use crate::carriers::Nco;
 use crate::constellations::*;
 use crate::modem::{Demodulator, Modulator, UnifiedModulator, UnifiedDemodulator, ConstellationType, DFEConfig};
+use crate::modem::walsh::WalshCorrelator;
 use crate::pulse_shapes::RootRaisedCosine;
 use crate::timing::FixedTiming;
 use crate::traits::{Carrier, Constellation, PulseShape, SymbolTiming};
@@ -358,6 +359,11 @@ pub struct UnifiedDemodulatorResource {
     pub inner: Mutex<UnifiedDemodulator>,
 }
 
+/// Resource wrapper for Walsh correlator
+pub struct WalshCorrelatorResource {
+    pub inner: Mutex<WalshCorrelator>,
+}
+
 /// Create a unified modulator with runtime constellation switching
 #[rustler::nif]
 pub fn unified_mod_new(
@@ -514,6 +520,20 @@ pub fn unified_demod_symbols(
         .map_err(|_| rustler::Error::Term(Box::new("lock poisoned")))?;
     
     Ok(state.demodulate(&samples))
+}
+
+/// Demodulate to I/Q then run through DFE equalizer, returning equalized I/Q
+#[rustler::nif]
+pub fn unified_demod_eq_iq(
+    demodulator: ResourceArc<UnifiedDemodulatorResource>,
+    samples: Vec<i16>,
+) -> NifResult<Vec<(f64, f64)>> {
+    let mut state = demodulator
+        .inner
+        .lock()
+        .map_err(|_| rustler::Error::Term(Box::new("lock poisoned")))?;
+    
+    Ok(state.demodulate_eq_iq(&samples))
 }
 
 /// Switch demodulator constellation
@@ -704,4 +724,259 @@ pub fn unified_demod_eq_mode(
             }
         })
         .unwrap_or(none())
+}
+
+/// Enable PLL telemetry recording
+#[rustler::nif]
+pub fn unified_demod_enable_telemetry(
+    demodulator: ResourceArc<UnifiedDemodulatorResource>,
+) -> Atom {
+    if let Ok(mut state) = demodulator.inner.lock() {
+        state.enable_telemetry();
+    }
+    ok()
+}
+
+/// Get PLL telemetry as list of tuples: [{symbol_idx, phase, freq, integrator, phase_error, mag_sq, lock_detect}]
+#[rustler::nif]
+pub fn unified_demod_take_telemetry(
+    demodulator: ResourceArc<UnifiedDemodulatorResource>,
+) -> Vec<(usize, f64, f64, f64, f64, f64, f64)> {
+    demodulator
+        .inner
+        .lock()
+        .map(|mut state| {
+            state.take_telemetry()
+                .into_iter()
+                .map(|t| (t.symbol_idx, t.phase, t.freq, t.integrator, t.phase_error, t.mag_sq, t.lock_detect))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Get current lock detector value
+#[rustler::nif]
+pub fn unified_demod_lock_detect(
+    demodulator: ResourceArc<UnifiedDemodulatorResource>,
+) -> f64 {
+    demodulator
+        .inner
+        .lock()
+        .map(|state| state.lock_detect())
+        .unwrap_or(0.0)
+}
+
+/// Set phase estimator block size
+#[rustler::nif]
+pub fn unified_demod_set_block_size(
+    demodulator: ResourceArc<UnifiedDemodulatorResource>,
+    size: usize,
+) -> Atom {
+    if let Ok(mut state) = demodulator.inner.lock() {
+        state.set_phase_block_size(size);
+    }
+    ok()
+}
+
+/// Get current phase estimator block size
+#[rustler::nif]
+pub fn unified_demod_get_block_size(
+    demodulator: ResourceArc<UnifiedDemodulatorResource>,
+) -> usize {
+    demodulator
+        .inner
+        .lock()
+        .map(|state| state.phase_block_size())
+        .unwrap_or(0)
+}
+
+/// Enable DFE telemetry recording
+#[rustler::nif]
+pub fn unified_demod_enable_dfe_telemetry(
+    demodulator: ResourceArc<UnifiedDemodulatorResource>,
+) -> Atom {
+    if let Ok(mut state) = demodulator.inner.lock() {
+        state.enable_dfe_telemetry();
+    }
+    ok()
+}
+
+/// Get DFE telemetry: [{symbol_idx, mse, cma_cost, out_mag_sq, in_mag_sq, tap_energy, mode}]
+#[rustler::nif]
+pub fn unified_demod_take_dfe_telemetry(
+    demodulator: ResourceArc<UnifiedDemodulatorResource>,
+) -> Vec<(u64, f64, f64, f64, f64, f64, u8)> {
+    demodulator
+        .inner
+        .lock()
+        .map(|mut state| {
+            state.take_dfe_telemetry()
+                .into_iter()
+                .map(|t| (t.symbol_idx, t.mse, t.cma_cost, t.out_mag_sq, t.in_mag_sq, t.tap_energy, t.mode))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+// ============================================================================
+// Walsh Correlator NIFs
+// ============================================================================
+
+/// Create a Walsh correlator
+#[rustler::nif]
+pub fn walsh_correlator_new(
+    n_phases: usize,
+    n_passes: usize,
+) -> ResourceArc<WalshCorrelatorResource> {
+    ResourceArc::new(WalshCorrelatorResource {
+        inner: Mutex::new(WalshCorrelator::new(n_phases, n_passes)),
+    })
+}
+
+/// Decode a frame of I/Q pairs.
+/// Returns: {[quadbit], [score]}
+#[rustler::nif]
+pub fn walsh_correlator_decode(
+    correlator: ResourceArc<WalshCorrelatorResource>,
+    descrambled_iq: Vec<(f64, f64)>,
+    raw_iq: Vec<(f64, f64)>,
+    scramble_offsets: Vec<u8>,
+) -> (Vec<u8>, Vec<f64>) {
+    correlator
+        .inner
+        .lock()
+        .map(|mut state| {
+            state.decode_frame(&descrambled_iq, &raw_iq, &scramble_offsets)
+        })
+        .unwrap_or_else(|_| (vec![], vec![]))
+}
+
+/// Decode a frame returning soft bit LLRs for soft Viterbi.
+/// Returns: {[quadbit], [score], [soft_llr]}
+/// soft_llr has 4 values per quadbit (384 total), MSB first.
+/// Positive LLR = bit more likely 1, negative = more likely 0.
+#[rustler::nif]
+pub fn walsh_correlator_decode_soft(
+    correlator: ResourceArc<WalshCorrelatorResource>,
+    descrambled_iq: Vec<(f64, f64)>,
+    raw_iq: Vec<(f64, f64)>,
+    scramble_offsets: Vec<u8>,
+) -> (Vec<u8>, Vec<f64>, Vec<f64>) {
+    correlator
+        .inner
+        .lock()
+        .map(|mut state| {
+            state.decode_frame_soft(&descrambled_iq, &raw_iq, &scramble_offsets)
+        })
+        .unwrap_or_else(|_| (vec![], vec![], vec![]))
+}
+
+/// Diagnostic decode: returns quadbits, scores, soft LLRs, and per-block diagnostics.
+/// diagnostics: [{evm_raw_db, evm_eq_db, isi_ratio, residual_fit}]
+#[rustler::nif]
+pub fn walsh_correlator_decode_diagnostic(
+    correlator: ResourceArc<WalshCorrelatorResource>,
+    descrambled_iq: Vec<(f64, f64)>,
+    raw_iq: Vec<(f64, f64)>,
+    scramble_offsets: Vec<u8>,
+) -> (Vec<u8>, Vec<f64>, Vec<f64>, Vec<(f64, f64, f64, f64)>) {
+    correlator
+        .inner
+        .lock()
+        .map(|mut state| {
+            state.decode_frame_diagnostic(&descrambled_iq, &raw_iq, &scramble_offsets)
+        })
+        .unwrap_or_else(|_| (vec![], vec![], vec![], vec![]))
+}
+
+/// Enable telemetry recording
+#[rustler::nif]
+pub fn walsh_correlator_enable_telemetry(
+    correlator: ResourceArc<WalshCorrelatorResource>,
+) -> Atom {
+    if let Ok(mut state) = correlator.inner.lock() {
+        state.enable_telemetry();
+    }
+    ok()
+}
+
+/// Get telemetry from last decode.
+#[rustler::nif]
+pub fn walsh_correlator_take_telemetry(
+    correlator: ResourceArc<WalshCorrelatorResource>,
+) -> (Vec<f64>, usize, f64, f64, f64, Vec<(f64, f64, f64, f64, f64)>) {
+    correlator
+        .inner
+        .lock()
+        .map(|mut state| {
+            match state.take_telemetry() {
+                Some(t) => {
+                    let blocks: Vec<(f64, f64, f64, f64, f64)> = t.blocks
+                        .iter()
+                        .map(|b| (b.score, b.phase, b.channel_mag, b.channel_phase, b.eq_gain))
+                        .collect();
+                    (t.pass_scores, t.pass_used, t.avg_score, t.min_score, t.phase_spread, blocks)
+                }
+                None => (vec![], 0, 0.0, 0.0, 0.0, vec![])
+            }
+        })
+        .unwrap_or_else(|_| (vec![], 0, 0.0, 0.0, 0.0, vec![]))
+}
+
+/// Turbo decode: iterative Walsh ↔ BCJR decoding.
+///
+/// Takes the equalized descrambled I/Q from the DFE and runs iterative
+/// decoding between the Walsh soft correlator and a BCJR MAP decoder.
+///
+/// Returns: {hard_bits, soft_dibit_llrs, iteration_scores}
+/// - hard_bits: decoded information bits
+/// - soft_dibit_llrs: final coded LLRs as [(llr1, llr2)] for metric extraction
+/// - iteration_scores: Walsh correlation total per iteration (convergence tracking)
+#[rustler::nif]
+pub fn walsh_turbo_decode(
+    correlator: ResourceArc<WalshCorrelatorResource>,
+    descrambled_iq: Vec<(f64, f64)>,
+    raw_iq: Vec<(f64, f64)>,
+    scramble_offsets: Vec<u8>,
+    n_iterations: usize,
+) -> (Vec<u8>, Vec<(f64, f64)>, Vec<f64>) {
+    correlator
+        .inner
+        .lock()
+        .map(|mut state| {
+            // First run the DFE passes to get best equalized I/Q
+            let (mut best_quadbits, best_scores) = state.correlate_all_blocks(&descrambled_iq);
+            let mut best_total: f64 = best_scores.iter().sum();
+            let mut best_eq_iq: Option<Vec<(f64, f64)>> = None;
+
+            for _pass in 1..state.n_passes {
+                let equalized = state.equalize_per_block(&raw_iq, &scramble_offsets, &best_quadbits);
+                let desc_eq = state.descramble_with_offsets(&equalized, &scramble_offsets);
+                let (new_qbs, new_scores) = state.correlate_all_blocks(&desc_eq);
+                let new_total: f64 = new_scores.iter().sum();
+
+                if new_total > best_total {
+                    best_quadbits = new_qbs;
+                    best_total = new_total;
+                    best_eq_iq = Some(desc_eq);
+                }
+            }
+
+            let final_iq = match &best_eq_iq {
+                Some(eq) => eq.as_slice(),
+                None => descrambled_iq.as_slice(),
+            };
+
+            // Now run turbo decode on the equalized I/Q
+            let (hard_bits, soft_llrs, _extrinsic, iter_scores) =
+                crate::modem::turbo::turbo_decode(
+                    &state.walsh_signs,
+                    final_iq,
+                    state.n_phases,
+                    n_iterations,
+                );
+
+            (hard_bits, soft_llrs, iter_scores)
+        })
+        .unwrap_or_else(|_| (vec![], vec![], vec![]))
 }

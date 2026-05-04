@@ -75,6 +75,9 @@ defmodule MinuteModemCore.DSP.PhyModem do
   def unified_demod_symbols(_demodulator, _samples),
     do: :erlang.nif_error(:nif_not_loaded)
 
+  def unified_demod_eq_iq(_demodulator, _samples),
+    do: :erlang.nif_error(:nif_not_loaded)
+
   def unified_demod_set_constellation(_demodulator, _constellation),
     do: :erlang.nif_error(:nif_not_loaded)
 
@@ -112,6 +115,28 @@ defmodule MinuteModemCore.DSP.PhyModem do
   def unified_demod_eq_mode(_demodulator),
     do: :erlang.nif_error(:nif_not_loaded)
 
+  # PLL Telemetry
+  def unified_demod_enable_telemetry(_demodulator),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  def unified_demod_take_telemetry(_demodulator),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  def unified_demod_lock_detect(_demodulator),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  def unified_demod_set_block_size(_demodulator, _size),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  def unified_demod_get_block_size(_demodulator),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  def unified_demod_enable_dfe_telemetry(_demodulator),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  def unified_demod_take_dfe_telemetry(_demodulator),
+    do: :erlang.nif_error(:nif_not_loaded)
+
   # ============================================================================
   # Convenience wrapper
   # ============================================================================
@@ -123,4 +148,29 @@ defmodule MinuteModemCore.DSP.PhyModem do
 
     unified_demod_new_with_eq(constellation, sample_rate, ff_taps, fb_taps, mu)
   end
+
+  # ============================================================================
+  # Walsh Correlator
+  # ============================================================================
+
+  def walsh_correlator_new(_n_phases, _n_passes),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  def walsh_correlator_decode(_correlator, _descrambled_iq, _raw_iq, _scramble_offsets),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  def walsh_correlator_decode_soft(_correlator, _descrambled_iq, _raw_iq, _scramble_offsets),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  def walsh_correlator_decode_diagnostic(_correlator, _descrambled_iq, _raw_iq, _scramble_offsets),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  def walsh_correlator_enable_telemetry(_correlator),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  def walsh_correlator_take_telemetry(_correlator),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  def walsh_turbo_decode(_correlator, _descrambled_iq, _raw_iq, _scramble_offsets, _n_iterations),
+    do: :erlang.nif_error(:nif_not_loaded)
 end

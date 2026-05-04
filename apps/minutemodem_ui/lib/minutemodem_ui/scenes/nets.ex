@@ -32,13 +32,19 @@ defmodule MinuteModemUI.Scenes.Nets do
   end
 
   defp default_form do
+    default_timing = %{
+      "scan_dwell_ms" => 500,
+      "lbt_time_ms" => 200,
+      "response_timeout_ms" => 2000
+    }
+
     %{
       name: "",
       net_type: "ale_4g",
       enabled: true,
       channels: [],
       members: [],
-      timing_config: %{},
+      timing_config: default_timing,
       # Channel form fields
       ch_freq_mhz: "",
       ch_name: "",
@@ -112,11 +118,37 @@ defmodule MinuteModemUI.Scenes.Nets do
 
   def handle_event({:ui_event, :form_net_type, :change, index}, model) do
     net_type = Enum.at(@net_types, index) || "ale_4g"
-    put_in(model, [:form, :net_type], net_type)
+
+    # Seed timing defaults from the net type
+    defaults = default_timing_for_type(net_type)
+    current_timing = model.form.timing_config
+
+    # Merge: keep any user-customized values, fill in missing from defaults
+    new_timing = Map.merge(defaults, current_timing)
+
+    model
+    |> put_in([:form, :net_type], net_type)
+    |> put_in([:form, :timing_config], new_timing)
   end
 
   def handle_event({:ui_event, :form_enabled, :change, value}, model) do
     put_in(model, [:form, :enabled], value)
+  end
+
+  ## ------------------------------------------------------------------
+  ## Handle Event - Timing config
+  ## ------------------------------------------------------------------
+
+  def handle_event({:ui_event, :form_scan_dwell, :change, value}, model) do
+    put_in(model, [:form, :timing_config, "scan_dwell_ms"], value)
+  end
+
+  def handle_event({:ui_event, :form_lbt_time, :change, value}, model) do
+    put_in(model, [:form, :timing_config, "lbt_time_ms"], value)
+  end
+
+  def handle_event({:ui_event, :form_response_timeout, :change, value}, model) do
+    put_in(model, [:form, :timing_config, "response_timeout_ms"], value)
   end
 
   ## ------------------------------------------------------------------
@@ -367,6 +399,30 @@ defmodule MinuteModemUI.Scenes.Nets do
       {:set, :form_net_type, selected: Enum.find_index(@net_types, &(&1 == form.net_type)) || 0}
     ]
 
+    tc = form.timing_config
+    scan_dwell = Map.get(tc, "scan_dwell_ms", 500)
+    lbt_time = Map.get(tc, "lbt_time_ms", 200)
+    response_timeout = Map.get(tc, "response_timeout_ms", 2000)
+
+    timing_widgets = [
+      {:ensure_widget, :timing_header, :static_text, :form_popup, label: "── Timing ──"},
+
+      {:ensure_widget, :form_scan_dwell_label, :static_text, :form_popup, label: "Scan Dwell (ms):"},
+      {:ensure_widget, :form_scan_dwell, :spin_ctrl, :form_popup,
+       min: 50, max: 5000, value: scan_dwell},
+      {:set, :form_scan_dwell, value: scan_dwell},
+
+      {:ensure_widget, :form_lbt_time_label, :static_text, :form_popup, label: "LBT (ms):"},
+      {:ensure_widget, :form_lbt_time, :spin_ctrl, :form_popup,
+       min: 50, max: 2000, value: lbt_time},
+      {:set, :form_lbt_time, value: lbt_time},
+
+      {:ensure_widget, :form_response_timeout_label, :static_text, :form_popup, label: "Response Timeout (ms):"},
+      {:ensure_widget, :form_response_timeout, :spin_ctrl, :form_popup,
+       min: 500, max: 30000, value: response_timeout},
+      {:set, :form_response_timeout, value: response_timeout}
+    ]
+
     channel_widgets = [
       {:ensure_widget, :channels_header, :static_text, :form_popup, label: "── Channels ──"},
       {:ensure_widget, :channels_list, :list_box, :form_popup, choices: channel_items, size: {400, 100}},
@@ -424,6 +480,14 @@ defmodule MinuteModemUI.Scenes.Nets do
          {:hbox, [], [:form_name_label, :form_name]},
          {:hbox, [], [:form_net_type_label, :form_net_type]},
          {:spacer, 10},
+         {:hbox, [], [:timing_header]},
+         {:hbox, [],
+          [:form_scan_dwell_label, :form_scan_dwell,
+           {:spacer, 10},
+           :form_lbt_time_label, :form_lbt_time,
+           {:spacer, 10},
+           :form_response_timeout_label, :form_response_timeout]},
+         {:spacer, 10},
          {:hbox, [], [:channels_header]},
          {:channels_list, proportion: 0},
          {:hbox, [],
@@ -453,7 +517,7 @@ defmodule MinuteModemUI.Scenes.Nets do
         {:spacer, 10}
       ]}}
 
-    popup_panel ++ base_widgets ++ channel_widgets ++ member_widgets ++ button_widgets ++ [layout, outer_layout]
+    popup_panel ++ base_widgets ++ timing_widgets ++ channel_widgets ++ member_widgets ++ button_widgets ++ [layout, outer_layout]
   end
 
   ## ------------------------------------------------------------------
@@ -461,13 +525,16 @@ defmodule MinuteModemUI.Scenes.Nets do
   ## ------------------------------------------------------------------
 
   defp net_to_form(net) do
+    defaults = default_timing_for_type(net.net_type || "ale_4g")
+    timing = Map.merge(defaults, net.timing_config || %{})
+
     %{
       name: net.name || "",
       net_type: net.net_type || "ale_4g",
       enabled: net.enabled,
       channels: net.channels || [],
       members: net.members || [],
-      timing_config: net.timing_config || %{},
+      timing_config: timing,
       ch_freq_mhz: "",
       ch_name: "",
       ch_band: "40m",
@@ -526,5 +593,16 @@ defmodule MinuteModemUI.Scenes.Nets do
       {val, _} -> val
       :error -> nil
     end
+  end
+
+  # Timing defaults per ALE generation (local copy — core module not available on UI node)
+  defp default_timing_for_type("ale_2g") do
+    %{"scan_dwell_ms" => 392, "lbt_time_ms" => 200, "response_timeout_ms" => 5000}
+  end
+  defp default_timing_for_type("ale_3g") do
+    %{"scan_dwell_ms" => 500, "lbt_time_ms" => 200, "response_timeout_ms" => 3000}
+  end
+  defp default_timing_for_type(_) do
+    %{"scan_dwell_ms" => 500, "lbt_time_ms" => 200, "response_timeout_ms" => 2000}
   end
 end

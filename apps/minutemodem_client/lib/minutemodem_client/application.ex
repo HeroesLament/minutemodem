@@ -7,16 +7,37 @@ defmodule MinuteModemClient.Application do
   def start(_type, _args) do
     # wx_mvu is already running (started as dependency)
 
-    # Start our scenes
-    {:ok, _} = WxMVU.start_scene(MinuteModemClient.Scenes.UI)
-    {:ok, _} = WxMVU.start_scene(MinuteModemClient.Scenes.DTE)
+    if LicenseCore.enabled?() and LicenseCore.check() != :ok do
+      {:ok, pid} = WxMVU.start_scene(LicenseUI.Scenes.License)
+      spawn(fn ->
+        ref = Process.monitor(pid)
+        receive do
+          {:DOWN, ^ref, :process, ^pid, _} -> start_main_scenes()
+        end
+      end)
+    else
+      start_main_scenes()
+    end
 
-    # Our own supervisor (for any non-UI processes)
-    children = []
-
-    Supervisor.start_link(children,
+    Supervisor.start_link([],
       strategy: :one_for_one,
       name: MinuteModemClient.Supervisor
     )
+  end
+
+  def start_main_scenes do
+    scenes = [
+      MinuteModemClient.Scenes.UI,
+      MinuteModemClient.Scenes.DTE
+    ]
+
+    for scene <- scenes do
+      case WxMVU.start_scene(scene) do
+        {:ok, _} -> :ok
+        {:error, {:already_started, _}} -> :ok
+      end
+    end
+
+    :ok
   end
 end

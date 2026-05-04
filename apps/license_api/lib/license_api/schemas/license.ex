@@ -10,6 +10,7 @@ defmodule LicenseAPI.Schemas.License do
     field :expires, :date
     field :key_string, :string
     field :status, :string, default: "active"
+    field :max_activations, :integer
     field :notes, :string
 
     timestamps(type: :utc_datetime)
@@ -17,7 +18,7 @@ defmodule LicenseAPI.Schemas.License do
 
   def changeset(license, attrs) do
     license
-    |> cast(attrs, [:email, :tier, :expires, :notes])
+    |> cast(attrs, [:email, :tier, :expires, :max_activations, :notes])
     |> validate_required([:email, :tier, :expires])
     |> validate_inclusion(:status, ~w(active revoked expired refunded superseded transferred))
     |> validate_format(:email, ~r/@/)

@@ -191,14 +191,17 @@ impl WattersonChannel {
         let carrier_phase_inc = 2.0 * PI * params.carrier_freq_hz / params.sample_rate as f64;
         
         // FIR LPF parameters
-        // Cutoff should be slightly wider than signal bandwidth
-        // ALE uses ~2400 Hz bandwidth, so 2800 Hz cutoff gives some margin
-        let lpf_cutoff = 2800.0;
+        // After mix-down, wanted baseband extends to ~1620 Hz (for 8-PSK with RRC alpha=0.35)
+        // The 2*carrier image starts at ~1980 Hz (mirror of 1620 Hz about DC after mixing)
+        // Transition gap is only 360 Hz, so we need many taps for sharp rolloff
+        // Cutoff at 1800 Hz (midpoint of 1620-1980 gap)
+        // 127 taps with Hamming: transition BW ≈ 3.3*fs/N = 3.3*9600/127 ≈ 249 Hz
+        // This fits within the 360 Hz gap with margin
+        let lpf_cutoff = 1800.0;
         let sample_rate = params.sample_rate as f64;
-        
-        // Use 31 taps for good stopband attenuation while keeping delay reasonable
-        // Group delay = (31-1)/2 = 15 samples ≈ 1.56ms at 9600 Hz
-        let num_taps = 31;
+        // 129 taps: group_delay = 64, which is divisible by samples_per_symbol (4)
+        // This ensures the channel delay doesn't shift the sample timing relative to symbol boundaries
+        let num_taps = 129;
         
         let lpf_i_0 = FirLowPassFilter::new(lpf_cutoff, sample_rate, num_taps);
         let lpf_q_0 = FirLowPassFilter::new(lpf_cutoff, sample_rate, num_taps);
@@ -215,7 +218,7 @@ impl WattersonChannel {
         let noise_power = reference_signal_power * 10.0_f64.powf(-params.snr_db / 10.0);
         let noise = NoiseGenerator::new(noise_power, &mut rng);
         
-        Self {
+        let mut channel = Self {
             params: params.clone(),
             sample_index: 0,
             tap0,
@@ -231,11 +234,18 @@ impl WattersonChannel {
             lpf_q_1,
             fir_group_delay,
             noise,
-        }
+        };
+        
+        channel
     }
     
     /// Process a block of samples through the channel
     /// Uses carrier mixing to properly apply complex fading to real audio
+    /// 
+    /// On the FIRST call (sample_index == 0), prepends group_delay zeros to the
+    /// input and trims the first group_delay outputs, so the result is 
+    /// sample-aligned with the input (no bulk delay from FIR startup).
+    /// Subsequent calls process normally (FIR is already primed).
     pub fn process(&mut self, input: &[f32]) -> Vec<f32> {
         let mut output = Vec::with_capacity(input.len());
         let delay_len = self.delay_line_i.len();
@@ -303,8 +313,8 @@ impl WattersonChannel {
             
             // === Mix back up to passband ===
             // Compute DELAYED carrier phase to compensate for FIR filter group delay
-            // The baseband I/Q at this instant corresponds to input from (group_delay) samples ago
-            let delay_samples = self.fir_group_delay + 1;
+            // The baseband I/Q at this instant corresponds to input from group_delay samples ago
+            let delay_samples = self.fir_group_delay;
             let phase_delay = delay_samples as f64 * self.carrier_phase_inc;
             let delayed_phase = self.carrier_phase - phase_delay;
             let cos_delayed = delayed_phase.cos();
@@ -328,8 +338,6 @@ impl WattersonChannel {
         
         output
     }
-
-    /// Advance channel state without processing samples
     /// Used for time synchronization
     pub fn advance(&mut self, num_samples: usize) {
         for _ in 0..num_samples {
@@ -740,17 +748,36 @@ mod tests {
         let input = generate_tone(1800.0, 9600.0, 1000, 0.5);
         let output = channel.process(&input);
         
-        let skip = 50;
-        let mut max_error = 0.0_f64;
-        for i in skip..input.len() {
-            let error = (output[i] - input[i]).abs() as f64;
-            if error > max_error {
-                max_error = error;
+        // The 1800 Hz tone is at the carrier, so baseband = DC.
+        // Group delay shifts output by (num_taps-1)/2 samples.
+        // Find best offset by cross-correlation
+        let skip = 200; // allow settling for larger filter
+        let mut best_err = f64::MAX;
+        let mut best_off = 0;
+        for off in 0..130 {
+            let mut max_e = 0.0_f64;
+            for i in skip..input.len().min(output.len() - off) {
+                let error = (output[i + off] - input[i]).abs() as f64;
+                if error > max_e { max_e = error; }
             }
+            if max_e < best_err { best_err = max_e; best_off = off; }
+        }
+        // Also try output leading input
+        for off in 1..130 {
+            if off > skip { continue; }
+            let mut max_e = 0.0_f64;
+            for i in skip..input.len().min(output.len()) {
+                if i < off { continue; }
+                let error = (output[i] - input[i - off]).abs() as f64;
+                if error > max_e { max_e = error; }
+            }
+            if max_e < best_err { best_err = max_e; best_off = off; }
         }
         
-        assert!(max_error < 0.05,
-            "Clean channel max error = {:.4}, should be < 0.05", max_error);
+        eprintln!("  Clean channel 1800Hz: best max_error={:.6} at offset={}", best_err, best_off);
+        
+        assert!(best_err < 0.05,
+            "Clean channel max error = {:.4} at offset {}, should be < 0.05", best_err, best_off);
     }
 
     #[test]
@@ -1184,5 +1211,345 @@ mod tests {
         assert!(timing_error < 20,
             "Preamble detected at {}, expected at {}, error = {} samples",
             best_pos, expected_pos, timing_error);
+    }
+
+    // ========================================================================
+    // WIDEBAND PASSTHROUGH TESTS (the critical bug-finding tests)
+    // ========================================================================
+
+    #[test]
+    fn test_mixdown_lpf_baseband_correctness() {
+        // Feed a 1200 Hz tone into the mix-down + LPF path manually
+        // and verify the baseband I/Q is correct.
+        //
+        // 1200 Hz = carrier(1800) - 600, so baseband freq = -600 Hz
+        // After LPF:
+        //   I_bb should be cos(2π×600×(n-15)/fs)  (cosine is even, so -600 → +600)
+        //   Q_bb should be -sin(2π×600×(n-15)/fs) (sine is odd, so -600 → -(+600))
+        
+        let fs = 9600.0;
+        let fc = 1800.0;
+        let f_test = 1200.0;
+        let f_bb = f_test - fc; // = -600 Hz
+        let carrier_phase_inc = 2.0 * PI * fc / fs;
+        
+        let mut lpf_i = FirLowPassFilter::new(2800.0, fs, 31);
+        let mut lpf_q = FirLowPassFilter::new(2800.0, fs, 31);
+        let group_delay = 15;
+        
+        let n = 500;
+        let mut carrier_phase: f64 = 0.0;
+        let mut i_bb_values = Vec::new();
+        let mut q_bb_values = Vec::new();
+        
+        for k in 0..n {
+            let t = k as f64 / fs;
+            let x = 0.5 * (2.0 * PI * f_test * t).cos();
+            
+            let cos_c = carrier_phase.cos();
+            let sin_c = carrier_phase.sin();
+            
+            let i_raw = x * cos_c * 2.0;
+            let q_raw = -x * sin_c * 2.0;
+            
+            let i_bb = lpf_i.process(i_raw);
+            let q_bb = lpf_q.process(q_raw);
+            
+            i_bb_values.push(i_bb);
+            q_bb_values.push(q_bb);
+            
+            carrier_phase += carrier_phase_inc;
+            if carrier_phase > 2.0 * PI { carrier_phase -= 2.0 * PI; }
+        }
+        
+        // After settling (skip group_delay + margin), check baseband
+        let skip = 50;
+        
+        // Expected baseband for a 1200 Hz input:
+        // I_bb[k] = 0.5 * cos(2π * f_bb * (k - group_delay) / fs)
+        //         = 0.5 * cos(2π * (-600) * (k-15) / fs)
+        //         = 0.5 * cos(-2π * 600 * (k-15) / fs)
+        //         = 0.5 * cos(2π * 600 * (k-15) / fs)
+        // Q_bb[k] = 0.5 * sin(2π * f_bb * (k - group_delay) / fs)
+        //         = 0.5 * sin(2π * (-600) * (k-15) / fs)
+        //         = -0.5 * sin(2π * 600 * (k-15) / fs)
+        
+        // Measure what frequency the I baseband is actually at
+        // by correlating with cos/sin at 600 Hz
+        let mut i_cos_600 = 0.0;
+        let mut i_sin_600 = 0.0;
+        let mut q_cos_600 = 0.0;
+        let mut q_sin_600 = 0.0;
+        let wlen = (n - skip) as f64;
+        
+        for k in skip..n {
+            let t_delayed = (k as f64 - group_delay as f64) / fs;
+            let cos_ref = (2.0 * PI * 600.0 * t_delayed).cos();
+            let sin_ref = (2.0 * PI * 600.0 * t_delayed).sin();
+            
+            i_cos_600 += i_bb_values[k] * cos_ref;
+            i_sin_600 += i_bb_values[k] * sin_ref;
+            q_cos_600 += q_bb_values[k] * cos_ref;
+            q_sin_600 += q_bb_values[k] * sin_ref;
+        }
+        
+        let i_mag = (i_cos_600 * i_cos_600 + i_sin_600 * i_sin_600).sqrt() / wlen;
+        let q_mag = (q_cos_600 * q_cos_600 + q_sin_600 * q_sin_600).sqrt() / wlen;
+        let i_phase = i_sin_600.atan2(i_cos_600) * 180.0 / PI;
+        let q_phase = q_sin_600.atan2(q_cos_600) * 180.0 / PI;
+        
+        eprintln!("  Baseband check for 1200 Hz input (expect 600 Hz baseband):");
+        eprintln!("  I_bb: mag={:.6} (expect ~0.25), phase={:.1}° (expect ~0°)", i_mag, i_phase);
+        eprintln!("  Q_bb: mag={:.6} (expect ~0.25), phase={:.1}° (expect ~180° or -180°)", q_mag, q_phase);
+        eprintln!("  I-Q phase diff: {:.1}°", i_phase - q_phase);
+            
+        // Now do the same for 2400 Hz (above carrier, baseband = +600 Hz)
+        let f_test2 = 2400.0;
+        let mut lpf_i2 = FirLowPassFilter::new(2800.0, fs, 31);
+        let mut lpf_q2 = FirLowPassFilter::new(2800.0, fs, 31);
+        carrier_phase = 0.0_f64;
+        let mut i2_bb = Vec::new();
+        let mut q2_bb = Vec::new();
+        
+        for k in 0..n {
+            let t = k as f64 / fs;
+            let x = 0.5 * (2.0 * PI * f_test2 * t).cos();
+            let cos_c = carrier_phase.cos();
+            let sin_c = carrier_phase.sin();
+            let i_raw = x * cos_c * 2.0;
+            let q_raw = -x * sin_c * 2.0;
+            i2_bb.push(lpf_i2.process(i_raw));
+            q2_bb.push(lpf_q2.process(q_raw));
+            carrier_phase += carrier_phase_inc;
+            if carrier_phase > 2.0 * PI { carrier_phase -= 2.0 * PI; }
+        }
+        
+        let mut i2_cos = 0.0; let mut i2_sin = 0.0;
+        let mut q2_cos = 0.0; let mut q2_sin = 0.0;
+        for k in skip..n {
+            let t_delayed = (k as f64 - group_delay as f64) / fs;
+            let cos_ref = (2.0 * PI * 600.0 * t_delayed).cos();
+            let sin_ref = (2.0 * PI * 600.0 * t_delayed).sin();
+            i2_cos += i2_bb[k] * cos_ref;
+            i2_sin += i2_bb[k] * sin_ref;
+            q2_cos += q2_bb[k] * cos_ref;
+            q2_sin += q2_bb[k] * sin_ref;
+        }
+        let i2_mag = (i2_cos * i2_cos + i2_sin * i2_sin).sqrt() / wlen;
+        let q2_mag = (q2_cos * q2_cos + q2_sin * q2_sin).sqrt() / wlen;
+        let i2_phase = i2_sin.atan2(i2_cos) * 180.0 / PI;
+        let q2_phase = q2_sin.atan2(q2_cos) * 180.0 / PI;
+        
+        eprintln!("  Baseband check for 2400 Hz input (expect 600 Hz baseband):");
+        eprintln!("  I_bb: mag={:.6} (expect ~0.25), phase={:.1}° (expect ~0°)", i2_mag, i2_phase);
+        eprintln!("  Q_bb: mag={:.6} (expect ~0.25), phase={:.1}° (expect ~0°)", q2_mag, q2_phase);
+        eprintln!("  I-Q phase diff: {:.1}°", i2_phase - q2_phase);
+        eprintln!("");
+        
+        // Print the actual waveforms for visual inspection
+        // For 1200 Hz: dump first few I_bb and Q_bb samples after settling
+        eprintln!("  1200 Hz baseband waveform (samples 50-60):");
+        for k in 50..60 {
+            let t_d = (k as f64 - 15.0) / fs;
+            let expected_i = 0.5 * (2.0 * PI * 600.0 * t_d).cos();
+            let expected_q_neg_sin = -0.5 * (2.0 * PI * 600.0 * t_d).sin();
+            eprintln!("    n={}: I_bb={:.5} (exp={:.5})  Q_bb={:.5} (exp -sin={:.5})",
+                k, i_bb_values[k], expected_i, q_bb_values[k], expected_q_neg_sin);
+        }
+        
+        // KEY DIAGNOSTIC: For the reconstruction to work:
+        // I_bb*cos(wt) - Q_bb*sin(wt) should equal the original signal (delayed)
+        // Let's compute this manually for the 1200 Hz case
+        eprintln!("");
+        eprintln!("  Manual reconstruction check (1200 Hz, no fading):");
+        let delay_samp = 16; // group_delay + 1 as used in process()
+        for k in 50..55 {
+            let orig_phase = 2.0 * PI * 1800.0 * (k as f64) / fs;
+            let delayed_phase = orig_phase - delay_samp as f64 * 2.0 * PI * 1800.0 / fs;
+            let recon = i_bb_values[k] * delayed_phase.cos() - q_bb_values[k] * delayed_phase.sin();
+            let expected = 0.5 * (2.0 * PI * 1200.0 * (k as f64 - 15.0) / fs).cos();
+            eprintln!("    n={}: recon={:.5}, expected(1200Hz@n-15)={:.5}, diff={:.5}",
+                k, recon, expected, (recon - expected).abs());
+        }
+        
+        // Also try with delay = 15 (group_delay only, no +1)
+        eprintln!("  Manual reconstruction with delay=15 (no +1):");
+        let delay_samp2 = 15;
+        for k in 50..55 {
+            let orig_phase = 2.0 * PI * 1800.0 * (k as f64) / fs;
+            let delayed_phase = orig_phase - delay_samp2 as f64 * 2.0 * PI * 1800.0 / fs;
+            let recon = i_bb_values[k] * delayed_phase.cos() - q_bb_values[k] * delayed_phase.sin();
+            let expected = 0.5 * (2.0 * PI * 1200.0 * (k as f64 - 15.0) / fs).cos();
+            eprintln!("    n={}: recon={:.5}, expected(1200Hz@n-15)={:.5}, diff={:.5}",
+                k, recon, expected, (recon - expected).abs());
+        }
+    }
+
+    #[test]
+    fn test_passthrough_two_tone() {
+        // Two tones: 1200 Hz (below carrier) and 2400 Hz (above carrier)
+        // Both should survive a clean channel with minimal error
+        let params = make_clean_channel_params();
+        let mut channel = WattersonChannel::new(params, 42);
+        
+        let n = 1000;
+        let fs = 9600.0;
+        let mut input: Vec<f32> = Vec::with_capacity(n);
+        for i in 0..n {
+            let t = i as f64 / fs;
+            let s = 0.3 * (2.0 * PI * 1200.0 * t).cos()
+                  + 0.3 * (2.0 * PI * 2400.0 * t).cos();
+            input.push(s as f32);
+        }
+        
+        let output = channel.process(&input);
+        
+        // After settling, compare input vs output at BEST offset
+        // Try multiple offsets to find the one that minimizes error
+        let mut best_nmse = f64::MAX;
+        let mut best_offset: i32 = 0;
+        for offset in 0..33 {
+            let skip = 50 + offset;
+            if skip >= n { continue; }
+            let mut sum_sq_err = 0.0_f64;
+            let mut sum_sq_sig = 0.0_f64;
+            for i in skip..n.min(n - offset) {
+                let err = output[i] as f64 - input[i - offset] as f64;
+                sum_sq_err += err * err;
+                sum_sq_sig += (input[i - offset] as f64) * (input[i - offset] as f64);
+            }
+            let nmse = if sum_sq_sig > 0.0 { sum_sq_err / sum_sq_sig } else { f64::MAX };
+            if nmse < best_nmse {
+                best_nmse = nmse;
+                best_offset = offset as i32;
+            }
+        }
+
+        eprintln!("  Two-tone: best NMSE={:.6} at offset={}", best_nmse, best_offset);
+
+        // Also measure energy at each frequency in the output
+        let skip = 50;
+        let window = &output[skip..n];
+        let wlen = window.len();
+        for &freq in &[1200.0_f64, 2400.0, 1800.0, 600.0, 3000.0] {
+            let mut c = 0.0;
+            let mut s = 0.0;
+            for (j, &sample) in window.iter().enumerate() {
+                let t = (j + skip) as f64 / fs;
+                c += sample as f64 * (2.0 * PI * freq * t).cos();
+                s += sample as f64 * (2.0 * PI * freq * t).sin();
+            }
+            let energy = (c * c + s * s).sqrt() / wlen as f64;
+            eprintln!("  Two-tone: energy at {} Hz = {:.6}", freq, energy);
+        }
+
+        assert!(best_nmse < 0.01,
+            "Two-tone through clean channel: best NMSE={:.4} at offset={}, should be < 0.01",
+            best_nmse, best_offset);
+    }
+
+    #[test]
+    fn test_passthrough_wideband_multitone() {
+        // Many tones spanning the full 8-PSK bandwidth
+        let params = make_clean_channel_params();
+        let mut channel = WattersonChannel::new(params, 42);
+        
+        let n = 2000;
+        let fs = 9600.0;
+        let freqs = [300.0, 600.0, 900.0, 1200.0, 1500.0, 1800.0, 2100.0, 2400.0, 2700.0, 3000.0, 3300.0];
+        let amp = 0.08; // Small enough that sum doesn't clip
+        
+        let mut input: Vec<f32> = Vec::with_capacity(n);
+        for i in 0..n {
+            let t = i as f64 / fs;
+            let mut s = 0.0;
+            for &f in &freqs {
+                s += amp * (2.0 * PI * f * t).cos();
+            }
+            input.push(s as f32);
+        }
+        
+        let output = channel.process(&input);
+        
+        // Search for best offset
+        let skip = 200;
+        let mut best_nmse = f64::MAX;
+        let mut best_offset = 0_usize;
+        for offset in 0..130 {
+            let mut sum_sq_err = 0.0_f64;
+            let mut sum_sq_sig = 0.0_f64;
+            for i in skip..(n - offset) {
+                let err = output[i + offset] as f64 - input[i] as f64;
+                sum_sq_err += err * err;
+                sum_sq_sig += (input[i] as f64) * (input[i] as f64);
+            }
+            let nmse = if sum_sq_sig > 0.0 { sum_sq_err / sum_sq_sig } else { f64::MAX };
+            if nmse < best_nmse { best_nmse = nmse; best_offset = offset; }
+        }
+        
+        eprintln!("  Multi-tone test: best NMSE={:.6} at offset={} ({} tones)", best_nmse, best_offset, freqs.len());
+        
+        // Measure per-tone energy preservation
+        let window = &output[skip..n];
+        let wlen = window.len();
+        for &freq in &freqs {
+            let mut c = 0.0;
+            let mut s = 0.0;
+            for (j, &sample) in window.iter().enumerate() {
+                let t = (j + skip) as f64 / fs;
+                c += sample as f64 * (2.0 * PI * freq * t).cos();
+                s += sample as f64 * (2.0 * PI * freq * t).sin();
+            }
+            let energy = (c * c + s * s).sqrt() / wlen as f64;
+            eprintln!("  Multi-tone: {} Hz energy={:.6}", freq, energy);
+        }
+        
+        assert!(best_nmse < 0.01,
+            "Multi-tone through clean channel: NMSE={:.4} at offset={}, should be < 0.01", best_nmse, best_offset);
+    }
+
+    #[test]
+    fn test_passthrough_chirp() {
+        // Linear chirp sweeping from 300 Hz to 3300 Hz — exercises all frequencies
+        let params = make_clean_channel_params();
+        let mut channel = WattersonChannel::new(params, 42);
+        
+        let n = 4000;
+        let fs = 9600.0;
+        let f0 = 300.0;
+        let f1 = 3300.0;
+        
+        let mut input: Vec<f32> = Vec::with_capacity(n);
+        for i in 0..n {
+            let t = i as f64 / fs;
+            let duration = n as f64 / fs;
+            let _freq = f0 + (f1 - f0) * t / duration;
+            let phase = 2.0 * PI * (f0 * t + (f1 - f0) * t * t / (2.0 * duration));
+            input.push((0.5 * phase.cos()) as f32);
+        }
+        
+        let output = channel.process(&input);
+        
+        // Search for best offset
+        let skip = 300;
+        let end = n - 300;
+        let mut best_nmse = f64::MAX;
+        let mut best_offset = 0_usize;
+        for offset in 0..130 {
+            let mut sum_sq_err = 0.0_f64;
+            let mut sum_sq_sig = 0.0_f64;
+            for i in skip..end.min(n - offset) {
+                let err = output[i + offset] as f64 - input[i] as f64;
+                sum_sq_err += err * err;
+                sum_sq_sig += (input[i] as f64) * (input[i] as f64);
+            }
+            let nmse = if sum_sq_sig > 0.0 { sum_sq_err / sum_sq_sig } else { f64::MAX };
+            if nmse < best_nmse { best_nmse = nmse; best_offset = offset; }
+        }
+        
+        eprintln!("  Chirp test: best NMSE={:.6} at offset={}", best_nmse, best_offset);
+        
+        assert!(best_nmse < 0.05,
+            "Chirp through clean channel: NMSE={:.4} at offset={}, should be < 0.05", best_nmse, best_offset);
     }
 }

@@ -18,6 +18,8 @@ defmodule LicenseCore.MixProject do
   end
 
   defp deps do
-    []
+    [
+      {:req, "~> 0.5"}
+    ]
   end
 end

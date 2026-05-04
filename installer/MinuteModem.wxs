@@ -1,0 +1,130 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  MinuteModem MSI installer.
+
+  Build with:
+      wix build -acceptEula wix7 ^
+          -ext WixToolset.UI.wixext ^
+          -d ReleaseDir=C:\build\minutemodem\_build\prod\rel\minutemodem_station ^
+          -d Version=0.1.0 ^
+          installer\MinuteModem.wxs ^
+          -o installer\dist\MinuteModem-0.1.0.msi
+
+  See `installer\build_msi.bat` for the wrapped build script.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+
+  <Package Name="MinuteModem"
+           Manufacturer="Northwest Tech"
+           Version="$(Version)"
+           UpgradeCode="F2FDA338-4E64-42EA-B1BF-BC510AF9DBDE"
+           Scope="perMachine">
+
+    <!-- Major upgrade: a new install with a higher version uninstalls the
+         old one first, transparently. Identical UpgradeCode across versions
+         is what wires this together. -->
+    <MajorUpgrade DowngradeErrorMessage="A newer version of MinuteModem is already installed. Setup will now exit." />
+
+    <!-- Single-cab MSI. For 200+MB releases this keeps everything in one
+         compressed payload inside the .msi. No external files needed. -->
+    <MediaTemplate EmbedCab="yes" />
+
+    <!-- Install layout:
+            Program Files\Northwest Tech\MinuteModem\...
+         StandardDirectory IDs are predefined by Windows Installer. -->
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="ManufacturerFolder" Name="Northwest Tech">
+        <Directory Id="INSTALLFOLDER" Name="MinuteModem" />
+      </Directory>
+    </StandardDirectory>
+
+    <!-- Start Menu layout:
+            Start Menu\Programs\Northwest Tech\
+              MinuteModem.lnk
+              MinuteModem (Console).lnk -->
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="ApplicationProgramsFolder" Name="Northwest Tech" />
+    </StandardDirectory>
+
+    <!-- ===========================================================
+         Feature: Application
+         All program files + shortcuts.
+         =========================================================== -->
+    <Feature Id="MainFeature"
+             Title="MinuteModem"
+             Level="1"
+             ConfigurableDirectory="INSTALLFOLDER"
+             AllowAdvertise="no"
+             Display="expand"
+             Description="MinuteModem application files">
+
+      <!-- WiX v5+ Files element: harvest every file in the release tree.
+           No more heat.exe. The ** glob recurses. Auto-generates stable
+           component IDs from path. -->
+      <Files Include="$(ReleaseDir)\**" Directory="INSTALLFOLDER" />
+
+      <!-- Shortcuts component. Lives in the start-menu folder, so the
+           directory needs to be created/removed by this component too.
+           One component for both shortcuts is fine since they share a
+           lifecycle. -->
+      <Component Id="ApplicationShortcuts"
+                 Directory="ApplicationProgramsFolder"
+                 Guid="3D9F5B1A-7E9C-4F32-9C8E-2A8B2A2C9F71">
+
+        <!-- End-user shortcut: GUI mode, no console window.
+             Uses `start` (not `start_iex`) so erl.exe runs detached. -->
+        <Shortcut Id="MinuteModemShortcut"
+                  Name="MinuteModem"
+                  Description="MinuteModem ALE radio software"
+                  Target="[INSTALLFOLDER]bin\minutemodem_station.bat"
+                  Arguments="start"
+                  WorkingDirectory="INSTALLFOLDER"
+                  Icon="MinuteModem.exe"
+                  IconIndex="0" />
+
+        <!-- Developer/support shortcut: console window with iex.
+             Useful for diagnosing problems without re-deploying. -->
+        <Shortcut Id="MinuteModemConsoleShortcut"
+                  Name="MinuteModem (Console)"
+                  Description="MinuteModem with interactive Elixir console"
+                  Target="[INSTALLFOLDER]bin\minutemodem_station.bat"
+                  Arguments="start_iex"
+                  WorkingDirectory="INSTALLFOLDER"
+                  Icon="MinuteModem.exe"
+                  IconIndex="0" />
+
+        <!-- Required for components in user-facing folders: clean up the
+             folder on uninstall, plus a registry "key path" sentinel. -->
+        <RemoveFolder Id="RemoveApplicationProgramsFolder"
+                      Directory="ApplicationProgramsFolder"
+                      On="uninstall" />
+
+        <RegistryValue Root="HKCU"
+                       Key="Software\Northwest Tech\MinuteModem"
+                       Name="installed"
+                       Type="integer"
+                       Value="1"
+                       KeyPath="yes" />
+      </Component>
+    </Feature>
+
+    <!-- Icon source. We point at the bundled erl.exe inside the release
+         tree to extract its icon. Once you have your own .ico, replace
+         this Source with the path to it. -->
+    <Icon Id="MinuteModem.exe"
+          SourceFile="$(ReleaseDir)\erts-16.4\bin\erl.exe" />
+
+    <!-- Shows up in Programs &amp; Features -->
+    <Property Id="ARPPRODUCTICON" Value="MinuteModem.exe" />
+    <Property Id="ARPHELPLINK" Value="https://github.com/HeroesLament" />
+    <!-- Note: ARPNOMODIFY and ARPNOREPAIR are set by WixUI_InstallDir
+         internally; setting them again here causes WIX0091. -->
+
+    <!-- Standard "InstallDir" UI flow: welcome, install dir picker,
+         confirm, progress, finish. No EULA, no feature tree. -->
+    <ui:WixUI Id="WixUI_InstallDir"
+              InstallDirectory="INSTALLFOLDER" />
+
+  </Package>
+</Wix>

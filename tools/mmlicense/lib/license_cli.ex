@@ -48,7 +48,9 @@ defmodule LicenseCLI do
       ["refund" | rest] -> cmd_refund(rest)
       ["note" | rest] -> cmd_note(rest)
       ["activations" | rest] -> cmd_activations(rest)
+      ["assert" | rest] -> cmd_assert(rest)
       ["download" | rest] -> cmd_download(rest)
+      ["seats" | rest] -> cmd_seats(rest)
       ["search" | rest] -> cmd_search(rest)
       ["expiring" | rest] -> cmd_expiring(rest)
       ["stats" | _] -> cmd_stats()
@@ -416,20 +418,116 @@ defmodule LicenseCLI do
   end
 
   # =================================================================
-  # Download .mmlic
+  # Assertions
+  # =================================================================
+
+  defp cmd_assert(args) do
+    config = Config.load!()
+    opts = parse_opts(args, [:machine_id, :output])
+    id = find_positional(args)
+    machine_id = opts[:machine_id] || "*"
+
+    case Client.post("/api/licenses/#{id}/assert", %{"machine_id" => machine_id}, config) do
+      {:ok, 200, %{"assertion" => assertion, "expires" => expires}} ->
+        Fmt.ok("Assertion generated! (expires #{expires})")
+        Fmt.info("Machine: #{machine_id}")
+
+        if output = opts[:output] do
+          # Get the key and write a .mmlic
+          case Client.get("/api/licenses/#{id}", config) do
+            {:ok, 200, %{"license" => l}} ->
+              contents = l["key_string"] <> "\n---\n" <> assertion
+              File.write!(output, contents)
+              Fmt.ok("Written to #{output}")
+
+            _ ->
+              # Fall back to just writing the assertion
+              File.write!(output, assertion)
+              Fmt.ok("Assertion written to #{output}")
+          end
+        else
+          Owl.IO.puts([Owl.Data.tag("  Assertion:\n", :cyan), "  ", assertion, "\n"])
+        end
+
+      {:ok, 409, body} ->
+        Fmt.err("Seat limit exceeded: #{body["current_activations"]}/#{body["max_activations"]}")
+
+      {:ok, status, body} ->
+        Fmt.err("Failed (#{status}): #{inspect(body)}")
+
+      {:error, reason} ->
+        Fmt.err("Connection failed: #{inspect(reason)}")
+    end
+  end
+
+  # =================================================================
+  # Seats
+  # =================================================================
+
+  defp cmd_seats(args) do
+    config = Config.load!()
+    opts = parse_opts(args, [:max])
+    id = find_positional(args)
+
+    case opts[:max] do
+      nil ->
+        # Show current seat info
+        case Client.get("/api/licenses/#{id}", config) do
+          {:ok, 200, %{"license" => l}} ->
+            max = l["max_activations"]
+            label = if max, do: "#{max}", else: "unlimited"
+            Fmt.ok("#{l["email"]}: #{label} seats")
+
+          {:ok, status, body} ->
+            Fmt.err("Failed (#{status}): #{inspect(body)}")
+
+          {:error, reason} ->
+            Fmt.err("Connection failed: #{inspect(reason)}")
+        end
+
+      max_str ->
+        max = if max_str == "unlimited", do: nil, else: String.to_integer(max_str)
+        body = %{"max_activations" => max}
+
+        case Client.post("/api/licenses/#{id}/seats", body, config) do
+          {:ok, 200, _} ->
+            label = if max, do: "#{max}", else: "unlimited"
+            Fmt.ok("Max activations set to #{label}")
+
+          {:ok, status, body} ->
+            Fmt.err("Failed (#{status}): #{inspect(body)}")
+
+          {:error, reason} ->
+            Fmt.err("Connection failed: #{inspect(reason)}")
+        end
+    end
+  end
+
+  # =================================================================
+  # Download .mmlic (now includes assertion)
   # =================================================================
 
   defp cmd_download(args) do
     config = Config.load!()
-    opts = parse_opts(args, [:output])
+    opts = parse_opts(args, [:output, :machine_id])
     id = find_positional(args)
+    machine_id = opts[:machine_id] || "*"
 
-    # First get the license to find the key
+    # Get the license
     case Client.get("/api/licenses/#{id}", config) do
       {:ok, 200, %{"license" => l}} ->
         filename = opts[:output] || "#{String.replace(l["email"], ~r/[^a-zA-Z0-9._-]/, "_")}.mmlic"
-        File.write!(filename, l["key_string"])
-        Fmt.ok("Written to #{filename}")
+
+        # Generate an assertion for the .mmlic
+        case Client.post("/api/licenses/#{id}/assert", %{"machine_id" => machine_id}, config) do
+          {:ok, 200, %{"assertion" => assertion}} ->
+            contents = l["key_string"] <> "\n---\n" <> assertion
+            File.write!(filename, contents)
+            Fmt.ok("Written to #{filename} (machine: #{machine_id})")
+
+          {:ok, status, body} ->
+            Fmt.err("Got license but assertion failed (#{status}): #{inspect(body)}")
+        end
 
       {:ok, status, body} ->
         Fmt.err("Failed (#{status}): #{inspect(body)}")
@@ -537,8 +635,14 @@ defmodule LicenseCLI do
       mmlicense revoke ID
       mmlicense refund ID
       mmlicense note ID --note "text"
-      mmlicense download ID [--output file.mmlic]
       mmlicense search QUERY
+
+    Activations:
+      mmlicense activations ID
+      mmlicense assert ID [--machine-id HASH] [--output file.mmlic]
+      mmlicense download ID [--output file.mmlic] [--machine-id HASH]
+      mmlicense seats ID [--max 3]
+      mmlicense seats ID --max unlimited
 
     Reports:
       mmlicense expiring [--days 30]

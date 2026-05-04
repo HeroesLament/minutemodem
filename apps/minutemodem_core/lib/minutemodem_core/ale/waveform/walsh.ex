@@ -77,6 +77,8 @@ defmodule MinuteModemCore.ALE.Waveform.Walsh do
     |> Enum.map(fn {chip, scr} -> rem(chip - scr + 8, 8) end)
   end
 
+  def descramble_preamble(_chips), do: {:error, :bad_preamble_length}
+
   # ===========================================================================
   # Table G-IX: Walsh-16 Sequences for Deep WALE Data
   # ===========================================================================
@@ -146,8 +148,21 @@ defmodule MinuteModemCore.ALE.Waveform.Walsh do
     |> Enum.max_by(fn {_, score} -> score end)
   end
 
+  @doc """
+  Correlate a single 16-symbol Walsh-16 base sequence (one copy out of 4).
+  Returns {best_quadbit, score} where score is out of 16.
+  """
+  def correlate_walsh_16_base(symbols) when length(symbols) == 16 do
+    0..15
+    |> Enum.map(fn quadbit ->
+      ref = walsh_16_base(quadbit)
+      {quadbit, correlate_bpsk(symbols, ref)}
+    end)
+    |> Enum.max_by(fn {_, score} -> score end)
+  end
+
   # BPSK correlation: 0-3 → +1, 4-7 → -1
-  defp correlate_bpsk(received, reference) do
+  def correlate_bpsk(received, reference) do
     Enum.zip(received, reference)
     |> Enum.reduce(0, fn {r, ref}, acc ->
       r_sign = if r < 4, do: 1, else: -1

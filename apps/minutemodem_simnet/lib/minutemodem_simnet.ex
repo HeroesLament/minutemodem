@@ -126,19 +126,102 @@ defmodule MinutemodemSimnet do
   """
   defdelegate unsubscribe_rx(rig_id), to: Routing.RxRegistry, as: :unsubscribe
 
+  @doc """
+  Sets the RX frequency for a rig's combiner.
+
+  Used during ALE scanning — takes effect on the next tick.
+  Only channels where the transmitter is on the same frequency
+  will contribute to the combined output.
+  """
+  def set_rx_frequency(rig_id, freq_hz) do
+    MinutemodemSimnet.RxCombiner.Combiner.set_rx_frequency(rig_id, freq_hz)
+  end
+
+  @doc """
+  Lists all attached rigs.
+  """
+  def list_rigs do
+    Rig.Attachment.list_attached_rigs()
+  end
+
   # Propagation utilities
 
   @doc """
   Computes propagation parameters between two rigs at a given frequency.
 
-  Useful for debugging or displaying link quality.
+  Uses the currently active HF engine (from epoch metadata).
 
   ## Example
 
       MinutemodemSimnet.compute_propagation(:station_a, :station_b, 7_300_000)
       # => {:ok, %{regime: :nvis, snr_db: 18.5, distance_km: 250, ...}}
   """
-  defdelegate compute_propagation(from_rig, to_rig, freq_hz),
-    to: Group.Environment,
-    as: :compute_channel_params
+  def compute_propagation(from_rig, to_rig, freq_hz, opts \\ []) do
+    MinutemodemSimnet.HFEngine.compute(from_rig, to_rig, freq_hz, opts)
+  end
+
+  # HF Engine management
+
+  @doc """
+  Returns the currently active HF engine name and module.
+  """
+  def hf_engine do
+    case Epoch.Store.get_metadata() do
+      {:ok, metadata} ->
+        engine = Map.get(metadata, :hf_engine, :naive)
+        {engine, MinutemodemSimnet.HFEngine.engine_module(engine)}
+      :error ->
+        {:naive, MinutemodemSimnet.HFEngine.Naive}
+    end
+  end
+
+  @doc """
+  Sets the HF propagation engine for the current epoch.
+
+  Accepts `:naive`, `:voacap`, or `:iturp533`.
+
+  ## Options
+
+  - `:solar_conditions` — `%{ssn: _, sfi: _, k_index: _}`
+
+  ## Example
+
+      MinutemodemSimnet.set_hf_engine(:voacap, solar_conditions: %{ssn: 100})
+  """
+  def set_hf_engine(engine_name, opts \\ []) when engine_name in [:naive, :voacap, :iturp533] do
+    case Epoch.Store.get_metadata() do
+      {:ok, metadata} ->
+        solar = Keyword.get(opts, :solar_conditions, metadata.solar_conditions)
+
+        updated = %{metadata |
+          hf_engine: engine_name,
+          solar_conditions: solar
+        }
+
+        :ok = Epoch.Store.set_metadata(updated)
+        {:ok, engine_name}
+
+      :error ->
+        {:error, :no_active_epoch}
+    end
+  end
+
+  @doc """
+  Sets solar conditions for the current epoch.
+
+  ## Example
+
+      MinutemodemSimnet.set_solar_conditions(%{ssn: 50, sfi: 100, k_index: 5})
+  """
+  def set_solar_conditions(conditions) when is_map(conditions) do
+    case Epoch.Store.get_metadata() do
+      {:ok, metadata} ->
+        updated = %{metadata | solar_conditions: Map.merge(metadata.solar_conditions, conditions)}
+        :ok = Epoch.Store.set_metadata(updated)
+        {:ok, updated.solar_conditions}
+
+      :error ->
+        {:error, :no_active_epoch}
+    end
+  end
 end

@@ -1,84 +1,73 @@
 defmodule LicenseCore.ActivationReporter do
   @moduledoc """
-  Best-effort activation reporting.
-
-  When a license is activated on an online machine, this module
-  attempts to POST the activation to the license API server.
-  If the server is unreachable, it silently succeeds — the license
-  still works. The report is fire-and-forget.
+  Requests a signed activation assertion from the license API server.
 
   Configure the API URL:
 
       config :license_core, :activation_url, "https://license.minutemodem.com/api/activations"
 
-  If not configured, reporting is silently skipped.
+  If not configured, returns {:error, :not_configured}.
   """
 
   require Logger
 
-  alias LicenseCore.MachineId
+  alias LicenseCore.{MachineId, Assertion}
 
   @doc """
-  Report an activation to the license server. Fire-and-forget.
-  Spawns an async task so it never blocks the activation flow.
+  Request a signed assertion from the license server.
+  Synchronous — blocks until the server responds or times out.
   """
-  def report(key_string) do
+  def request_assertion(key_string) do
     case activation_url() do
       nil ->
-        Logger.debug("ActivationReporter: no activation_url configured, skipping")
-        :skipped
+        {:error, :not_configured}
 
       url ->
-        Task.start(fn -> do_report(url, key_string) end)
-        :ok
+        do_request(url, key_string)
     end
   end
 
-  defp do_report(url, key_string) do
-    body =
-      Jason.encode!(%{
-        activation: %{
-          key_hash: key_hash(key_string),
-          machine_id: MachineId.fingerprint(),
-          machine_info: MachineId.machine_info()
+  defp do_request(url, key_string) do
+    machine_info = MachineId.machine_info()
+
+    body = %{
+      "activation" => %{
+        "key_hash" => Assertion.key_hash(key_string),
+        "machine_id" => MachineId.fingerprint(),
+        "machine_info" => %{
+          "hostname" => machine_info.hostname,
+          "os" => machine_info.os,
+          "arch" => machine_info.arch
         }
-      })
+      }
+    }
 
-    case http_post(url, body) do
-      {:ok, status} when status in 200..299 ->
-        Logger.debug("ActivationReporter: reported successfully")
+    case Req.post(url, json: body, connect_options: [timeout: 5_000], receive_timeout: 10_000) do
+      {:ok, %{status: 200, body: %{"assertion" => assertion_string}}} ->
+        {:ok, assertion_string}
 
-      {:ok, status} ->
-        Logger.debug("ActivationReporter: server returned #{status}, ignoring")
+      {:ok, %{status: 200, body: %{"error" => "denied"}}} ->
+        {:error, :denied}
+
+      {:ok, %{status: 403}} ->
+        {:error, :denied}
+
+      {:ok, %{status: 409, body: resp}} ->
+        Logger.warning("Activation denied: #{resp["error"] || "seat limit exceeded"}")
+        {:error, :seat_limit_exceeded}
+
+      {:ok, %{status: status}} ->
+        Logger.debug("ActivationReporter: server returned #{status}")
+        {:error, {:server_error, status}}
 
       {:error, reason} ->
-        Logger.debug("ActivationReporter: failed to report — #{inspect(reason)}")
+        Logger.debug("ActivationReporter: request failed — #{inspect(reason)}")
+        {:error, {:network_error, reason}}
     end
   rescue
     e ->
-      Logger.debug("ActivationReporter: exception during report — #{inspect(e)}")
-  end
-
-  defp http_post(url, body) do
-    # Use built-in :httpc — no external HTTP client dependency
-    :inets.start()
-    if Code.ensure_loaded?(:ssl), do: :ssl.start()
-
-    headers = [
-      {~c"content-type", ~c"application/json"},
-      {~c"user-agent", ~c"MinuteModem/#{Application.spec(:license_core, :vsn)}"}
-    ]
-
-    request = {to_charlist(url), headers, ~c"application/json", to_charlist(body)}
-
-    case :httpc.request(:post, request, [{:timeout, 5000}, {:connect_timeout, 3000}], []) do
-      {:ok, {{_, status, _}, _, _}} -> {:ok, status}
-      {:error, reason} -> {:error, reason}
-    end
-  end
-
-  defp key_hash(key_string) do
-    :crypto.hash(:sha256, key_string) |> Base.encode16(case: :lower)
+      Logger.debug("ActivationReporter: exception — #{inspect(e)}")
+      {:error, {:exception, e}}
   end
 
   defp activation_url do

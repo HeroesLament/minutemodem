@@ -21,3 +21,40 @@ rel/
 *.db-shm
 
 *.db-wal
+
+# Secrets / keys
+*.key
+*.pem
+*.p12
+*.pfx
+*license_private*
+
+# Local databases
+*.db
+license_api_dev.db
+*_dev.db
+
+# Compiled native artifacts
+priv/native/
+*.dll
+*.dylib
+
+# Crash dumps
+erl_crash.dump
+*.dump
+
+# OS metadata
+.DS_Store
+._*
+Thumbs.db
+
+# Editor / IDE
+.vscode/
+.idea/
+
+# Test scratch files at root
+/test.exs
+/test.txt
+
+# Test license files
+*.mmlic

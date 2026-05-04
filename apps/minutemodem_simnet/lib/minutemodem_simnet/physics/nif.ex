@@ -50,4 +50,66 @@ defmodule MinutemodemSimnet.Physics.Nif do
   """
   @spec channel_count() :: non_neg_integer()
   def channel_count(), do: :erlang.nif_error(:nif_not_loaded)
+
+  # ===========================================================================
+  # RxCombiner interface (ResourceArc-based)
+  # ===========================================================================
+
+  @doc """
+  Creates a new RxCombiner. Returns an opaque NIF resource reference.
+  """
+  def combiner_new(_rig_id, _sample_rate, _block_samples, _noise_floor_dbm, _seed, _initial_rx_freq_hz),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
+  Adds an inbound Watterson channel to the combiner.
+  """
+  def combiner_add_channel(_ref, _from_rig, _params, _freq_hz),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
+  Removes an inbound channel from the combiner.
+  """
+  def combiner_remove_channel(_ref, _from_rig),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
+  Queues TX samples from a source rig for the next tick.
+  Samples must be an f32-ne binary. Also updates the source's TX frequency.
+  """
+  def combiner_push_tx(_ref, _from_rig, _samples, _freq_hz),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
+  Sets the frequency this receiver is tuned to.
+  """
+  def combiner_set_rx_freq(_ref, _freq_hz),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
+  Updates Watterson params for a specific inbound channel.
+  Used when frequency changes alter propagation characteristics.
+  """
+  def combiner_update_channel_params(_ref, _from_rig, _params),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
+  Processes one tick: runs all channels through Watterson, sums
+  frequency-coherent outputs, adds noise floor.
+  Returns combined f32-ne binary.
+  """
+  def combiner_tick(_ref),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
+  Returns the number of inbound channels in the combiner.
+  """
+  def combiner_channel_count(_ref),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
+  Returns debug info: list of {from_rig, tx_freq_hz, has_pending_tx}.
+  """
+  def combiner_info(_ref),
+    do: :erlang.nif_error(:nif_not_loaded)
 end

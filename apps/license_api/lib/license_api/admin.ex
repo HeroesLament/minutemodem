@@ -532,6 +532,128 @@ defmodule LicenseAPI.Admin do
   end
 
   # =================================================================
+  # Activation assertions
+  # =================================================================
+
+  @doc """
+  Generate a signed assertion for a specific license and machine.
+  For online use: ties the assertion to a specific machine_id.
+
+      LicenseAPI.Admin.generate_assertion("license-uuid", "machine-fingerprint-hash")
+  """
+  def generate_assertion(license_id, machine_id) do
+    case Repo.get(License, license_id) do
+      nil ->
+        IO.puts("✗ License not found: #{license_id}")
+        {:error, :not_found}
+
+      license ->
+        key_hash = :crypto.hash(:sha256, license.key_string) |> Base.encode16(case: :lower)
+        assertion_expires = Date.add(Date.utc_today(), 365)
+
+        payload =
+          "#{key_hash}|#{machine_id}|#{Date.to_iso8601(Date.utc_today())}|#{Date.to_iso8601(assertion_expires)}"
+
+        case KeyStore.sign_assertion(payload) do
+          {:ok, assertion_string} ->
+            # Record the activation
+            %Activation{}
+            |> Activation.changeset(%{
+              key_hash: key_hash,
+              machine_id: machine_id,
+              assertion_string: assertion_string,
+              status: "active",
+              license_id: license.id
+            })
+            |> Repo.insert(
+              on_conflict: {:replace, [:assertion_string, :updated_at]},
+              conflict_target: [:key_hash, :machine_id]
+            )
+
+            IO.puts("""
+
+            ✓ Assertion generated!
+              License: #{license.id} (#{license.email})
+              Machine: #{machine_id}
+              Expires: #{assertion_expires}
+
+              Assertion:
+              #{assertion_string}
+            """)
+
+            {:ok, assertion_string}
+
+          {:error, :not_provisioned} ->
+            IO.puts("✗ No signing key. Run provision_keypair/1 first.")
+            {:error, :not_provisioned}
+        end
+    end
+  end
+
+  @doc """
+  Generate a wildcard assertion for offline/airgapped installs.
+  Works on any machine. Use sparingly.
+
+      LicenseAPI.Admin.generate_offline_assertion("license-uuid")
+  """
+  def generate_offline_assertion(license_id) do
+    generate_assertion(license_id, "*")
+  end
+
+  @doc """
+  Generate a .mmlic file containing both the license key and assertion.
+  For USB transfer to airgapped machines.
+
+      LicenseAPI.Admin.generate_mmlic("license-uuid", "./customer.mmlic")
+      LicenseAPI.Admin.generate_mmlic("license-uuid", "./customer.mmlic", machine_id: "abc123")
+  """
+  def generate_mmlic(license_id, output_path, opts \\ []) do
+    machine_id = Keyword.get(opts, :machine_id, "*")
+
+    case Repo.get(License, license_id) do
+      nil ->
+        IO.puts("✗ License not found: #{license_id}")
+        {:error, :not_found}
+
+      license ->
+        case generate_assertion(license_id, machine_id) do
+          {:ok, assertion_string} ->
+            contents = license.key_string <> "\n---\n" <> assertion_string
+            File.write!(output_path, contents)
+            IO.puts("✓ Written to #{output_path}")
+            {:ok, output_path}
+
+          error ->
+            error
+        end
+    end
+  end
+
+  @doc """
+  Set the max activations (seat count) for a license.
+  nil = unlimited.
+
+      LicenseAPI.Admin.set_max_activations("license-uuid", 3)
+      LicenseAPI.Admin.set_max_activations("license-uuid", nil)  # unlimited
+  """
+  def set_max_activations(license_id, max) when is_nil(max) or is_integer(max) do
+    case Repo.get(License, license_id) do
+      nil ->
+        IO.puts("✗ License not found: #{license_id}")
+        {:error, :not_found}
+
+      license ->
+        license
+        |> Ecto.Changeset.change(max_activations: max)
+        |> Repo.update()
+
+        label = if max, do: "#{max}", else: "unlimited"
+        IO.puts("✓ Max activations set to #{label} for #{license.email}")
+        :ok
+    end
+  end
+
+  # =================================================================
   # Internal
   # =================================================================
 

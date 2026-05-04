@@ -22,13 +22,19 @@ defmodule MinutemodemSimnet.Channel.FSM do
   alias MinutemodemSimnet.Epoch
   alias MinutemodemSimnet.Routing.RxRegistry
 
+  # Noise floor tick: 20ms at 9600 Hz = 192 samples
+  @noise_tick_ms 20
+  @noise_tick_samples 192
+  @noise_block_bytes @noise_tick_samples * 4  # f32
+
   defstruct [
     :from_rig,
     :to_rig,
     :channel_id,
     :sample_index,
     :params,
-    :rx_callback
+    :rx_callback,
+    :noise_timer
   ]
 
 
@@ -94,7 +100,8 @@ defmodule MinutemodemSimnet.Channel.FSM do
           {:ok, channel_id} ->
             Logger.debug("[ChannelFSM] Created channel with id: #{inspect(channel_id)}")
             new_data = %{data | channel_id: channel_id, sample_index: metadata.t0}
-            {:next_state, :armed, new_data}
+            timer = Process.send_after(self(), :noise_tick, @noise_tick_ms)
+            {:next_state, :armed, %{new_data | noise_timer: timer}}
 
           {:error, reason} ->
             Logger.error("[ChannelFSM] Failed to create channel: #{inspect(reason)}")
@@ -114,13 +121,18 @@ defmodule MinutemodemSimnet.Channel.FSM do
   # State: armed
 
   def armed({:call, from}, {:tx_block, t0, samples}, data) do
+    # Cancel pending noise tick — real TX takes priority
+    if data.noise_timer, do: Process.cancel_timer(data.noise_timer)
+
     case process_block(t0, samples, data) do
       {:ok, output, new_data} ->
         deliver_rx(output, new_data)
-        {:next_state, :active, new_data, [{:reply, from, :ok}]}
+        timer = Process.send_after(self(), :noise_tick, @noise_tick_ms)
+        {:next_state, :active, %{new_data | noise_timer: timer}, [{:reply, from, :ok}]}
 
       {:error, reason} ->
-        {:keep_state_and_data, [{:reply, from, {:error, reason}}]}
+        timer = Process.send_after(self(), :noise_tick, @noise_tick_ms)
+        {:keep_state, %{data | noise_timer: timer}, [{:reply, from, {:error, reason}}]}
     end
   end
 
@@ -129,16 +141,28 @@ defmodule MinutemodemSimnet.Channel.FSM do
     {:keep_state, new_data, [{:reply, from, :ok}]}
   end
 
+  def armed(:info, :noise_tick, data) do
+    data = generate_noise_block(data)
+    timer = Process.send_after(self(), :noise_tick, @noise_tick_ms)
+    {:keep_state, %{data | noise_timer: timer}}
+  end
+
   # State: active
 
   def active({:call, from}, {:tx_block, t0, samples}, data) do
+    # Cancel pending noise tick — real TX takes priority
+    if data.noise_timer, do: Process.cancel_timer(data.noise_timer)
+
     case process_block(t0, samples, data) do
       {:ok, output, new_data} ->
         deliver_rx(output, new_data)
-        {:keep_state, new_data, [{:reply, from, :ok}]}
+        # Restart noise tick after TX block
+        timer = Process.send_after(self(), :noise_tick, @noise_tick_ms)
+        {:keep_state, %{new_data | noise_timer: timer}, [{:reply, from, :ok}]}
 
       {:error, reason} ->
-        {:keep_state_and_data, [{:reply, from, {:error, reason}}]}
+        timer = Process.send_after(self(), :noise_tick, @noise_tick_ms)
+        {:keep_state, %{data | noise_timer: timer}, [{:reply, from, {:error, reason}}]}
     end
   end
 
@@ -147,8 +171,15 @@ defmodule MinutemodemSimnet.Channel.FSM do
     {:keep_state, new_data, [{:reply, from, :ok}]}
   end
 
+  def active(:info, :noise_tick, data) do
+    data = generate_noise_block(data)
+    timer = Process.send_after(self(), :noise_tick, @noise_tick_ms)
+    {:keep_state, %{data | noise_timer: timer}}
+  end
+
   def active(:cast, :drain, data) do
-    {:next_state, :draining, data}
+    if data.noise_timer, do: Process.cancel_timer(data.noise_timer)
+    {:next_state, :draining, %{data | noise_timer: nil}}
   end
 
   # State: draining
@@ -172,6 +203,21 @@ defmodule MinutemodemSimnet.Channel.FSM do
   end
 
   # Internal helpers
+
+  # Generate a block of channel noise (zeros through the channel model → pure AWGN output)
+  defp generate_noise_block(data) do
+    silence = <<0::size(@noise_block_bytes)-unit(8)>>
+    t0 = data.sample_index
+
+    case do_process_block(t0, silence, data) do
+      {:ok, output, new_data} ->
+        deliver_rx(output, new_data)
+        new_data
+
+      {:error, _reason} ->
+        data
+    end
+  end
 
   defp process_block(t0, samples, data) do
     # Handle time gaps by advancing the channel state

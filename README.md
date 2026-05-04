@@ -1,84 +1,87 @@
-# Minutemodem
+# MinuteModem
 
-**TODO: Add description**
+ALE radio software for Windows. Native MSVC build, real-time audio I/O,
+software-rendered OpenGL spectrogram, deployable as a per-machine MSI
+installer.
 
-## Installation
+## Quick start
 
-If [available in Hex](https://hex.pm/docs/publish), the package can be installed
-by adding `minutemodem` to your list of dependencies in `mix.exs`:
+> First-time setup is involved. See
+> [`docs/BUILD_ENVIRONMENT.md`](docs/BUILD_ENVIRONMENT.md) for the
+> required toolchain (Erlang, Elixir, MSVC, .NET SDK, WiX, PortAudio,
+> Mesa3D).
 
-```elixir
-def deps do
-  [
-    {:minutemodem, "~> 0.1.0"}
-  ]
-end
+Once the environment is set up, daily development is:
+
+```cmd
+:: Open the build shell (sets up MSVC, dotnet, WiX paths)
+C:\build\minutemodem-build-shell.cmd
+
+:: Build a prod release
+set MIX_ENV=prod
+set MM_UNLOCKED=true
+mix release minutemodem_station --overwrite
+
+:: Run it directly
+_build\prod\rel\minutemodem_station\bin\minutemodem_station.bat start_iex
+
+:: ...or package as an MSI
+installer\build_msi.bat
 ```
 
-Documentation can be generated with [ExDoc](https://github.com/elixir-lang/ex_doc)
-and published on [HexDocs](https://hexdocs.pm). Once published, the docs can
-be found at <https://hexdocs.pm/minutemodem>.
+The MSI lands at `installer\dist\MinuteModem-<version>.msi`. Double-click
+to install (per-machine, requires UAC). Start menu gets two shortcuts
+under "Northwest Tech":
 
+- **MinuteModem** — GUI only, no console (end-user experience)
+- **MinuteModem (Console)** — GUI plus iex prompt for diagnostics
 
-rig1_id = "2239f04a-d0a7-48af-bab0-78b8f3c64300"
-rig2_id = "d938cc0c-ea01-424f-82e4-45f106884d3e"
-alias MinuteModemCore.ALE.Link
-Link.scan(rig2_id)
-Process.sleep(500)
-Link.call(rig1_id, 0x1234)
-Process.sleep(500)
-Link.stop(rig2_id)
-Link.scan(rig2_id)
-Link.call(rig1_id, 0x1234)
-Process.sleep(500)
-Link.stop(rig2_id)
-Link.scan(rig2_id)
-Link.call(rig1_id, 0x1234)
+## What's in here
 
+MinuteModem is an Elixir umbrella with native MSVC NIFs, a wxWidgets
+GUI, and an audio pipeline built on Membrane Framework. The umbrella
+structure:
 
-# Setup
-rig1_id = "2239f04a-d0a7-48af-bab0-78b8f3c64300"
-rig2_id = "d938cc0c-ea01-424f-82e4-45f106884d3e"
-alias MinuteModemCore.ALE.Link
+```
+apps/
+├── minutemodem_core/       Audio pipeline, ALE link layer, persistence,
+│                           rig control, modem implementations
+├── minutemodem_ui/         wxWidgets GUI (scenes, renderer, OpenGL canvas)
+├── minutemodem_simnet/     HF channel simulation for offline testing
+├── minutemodem_client/     DTE client for external integrations
+├── license_core/           License key validation
+├── license_tui/            Terminal-mode license entry
+├── license_ui/             GUI license entry
+└── license_api/            License key issuance API (separate release)
+```
 
-# Start scanning
-Link.scan(rig2_id)
-Process.sleep(500)
+Native code lives in `apps/minutemodem_core/native/` (Rust crates for
+MELP voice codec and PHY modem) and across several forks of upstream
+Membrane libraries that needed Windows MSVC support.
 
-# Initiate call - Deep WALE takes ~3 seconds + response time
-Link.call(rig1_id, 0x1234)
-Process.sleep(5000)  # Wait for full handshake
+## Releases
 
-# Now linked - terminate cleanly
-Link.stop(rig2_id)
-Process.sleep(1000)  # Wait for LsuTerm to propagate
+Four release configurations are defined in the umbrella's `mix.exs`:
 
-# Second cycle
-Link.scan(rig2_id)
-Process.sleep(500)
+| Release              | Purpose                                   |
+| -------------------- | ----------------------------------------- |
+| `minutemodem_station` | Full app: UI, core, audio, all rigs       |
+| `minutemodem_remote`  | UI-only, connects to a remote core node   |
+| `minutemodem_core`    | Headless core, no GUI                     |
+| `license_api`         | License issuance HTTP API                 |
 
-Link.call(rig1_id, 0x1234)
-Process.sleep(5000)
+`minutemodem_station` is the one shipped via MSI. The others are for
+deployment scenarios we'll grow into.
 
-Link.stop(rig2_id)
-Process.sleep(1000)
+## Documentation
 
-# Now linked - terminate cleanly
-Link.stop(rig2_id)
-Process.sleep(1000)  # Wait for LsuTerm to propagate
+| Document | Topic |
+| -------- | ----- |
+| [`docs/BUILD_ENVIRONMENT.md`](docs/BUILD_ENVIRONMENT.md) | Toolchain setup, build shell, dependencies |
+| [`docs/WINDOWS_PATH_HANDLING.md`](docs/WINDOWS_PATH_HANDLING.md) | How we make releases robust to `Program Files (x86)` and other parenthesized install paths |
+| [`docs/MESA_OPENGL.md`](docs/MESA_OPENGL.md) | Why Mesa3D ships with the release, how it enables wxGLCanvas to work over RDP |
+| [`installer/README.md`](installer/README.md) | WiX v7 MSI build process |
 
-# Second cycle
-Link.scan(rig2_id)
-Process.sleep(500)
+## License
 
-Link.call(rig1_id, 0x1234)
-Process.sleep(5000)
-
-Link.stop(rig2_id)
-Process.sleep(1000)
-
-# Now linked - terminate cleanly
-Link.stop(rig2_id)
-Process.sleep(1000)  # Wait for LsuTerm to propagate
-
-Logger.configure(level: :debug)
+Proprietary. Built and maintained by Northwest Tech.

@@ -61,8 +61,8 @@ defmodule MinuteModemCore.ALE.Waveform.FastWale do
 
   ## Options
   - `:tuner_time_ms` - TLC duration for radio tuning (default: 0)
-  - `:capture_probe_count` - Number of capture probes for async (default: 1)
-  - `:async` - true for async call (includes capture probe)
+  - `:capture_probe_count` - Number of capture probes (default: 1)
+  - `:include_probe` - true to prepend capture probe + TLC for cold-start receivers (default: true)
   - `:more_pdus` - true if M bit should be set
 
   Returns list of 8-PSK symbols (0-7).
@@ -70,14 +70,14 @@ defmodule MinuteModemCore.ALE.Waveform.FastWale do
   def assemble_frame(pdu_binary, opts \\ []) do
     tuner_time_ms = Keyword.get(opts, :tuner_time_ms, 0)
     capture_probe_count = Keyword.get(opts, :capture_probe_count, 1)
-    async = Keyword.get(opts, :async, true)
+    include_probe = Keyword.get(opts, :include_probe, Keyword.get(opts, :async, true))
     more_pdus = Keyword.get(opts, :more_pdus, false)
 
     # 1. TLC blocks
     tlc_symbols = build_tlc(tuner_time_ms)
 
-    # 2. Capture probe (async only)
-    capture_symbols = if async do
+    # 2. Capture probe (for cold-start receivers)
+    capture_symbols = if include_probe do
       Walsh.capture_probe()
       |> List.duplicate(capture_probe_count)
       |> List.flatten()
@@ -93,6 +93,9 @@ defmodule MinuteModemCore.ALE.Waveform.FastWale do
 
     # 5. Data blocks with interleaved probes
     data_symbols = encode_data(pdu_binary)
+
+    require Logger
+    Logger.info("[FastWale] assemble: tlc=#{length(tlc_symbols)} capture=#{length(capture_symbols)} preamble=#{length(preamble_symbols)} init_probe=#{length(initial_probe)} data=#{length(data_symbols)} total=#{length(tlc_symbols) + length(capture_symbols) + length(preamble_symbols) + length(initial_probe) + length(data_symbols)}")
 
     tlc_symbols ++ capture_symbols ++ preamble_symbols ++ initial_probe ++ data_symbols
   end
@@ -255,10 +258,10 @@ defmodule MinuteModemCore.ALE.Waveform.FastWale do
   def frame_timing(pdu_binary, opts \\ []) do
     tuner_time_ms = Keyword.get(opts, :tuner_time_ms, 0)
     capture_probe_count = Keyword.get(opts, :capture_probe_count, 1)
-    async = Keyword.get(opts, :async, true)
+    include_probe = Keyword.get(opts, :include_probe, Keyword.get(opts, :async, true))
 
     tlc_symbols = div(tuner_time_ms * @symbol_rate, 1000)
-    capture_symbols = if async, do: 96 * capture_probe_count, else: 0
+    capture_symbols = if include_probe, do: 96 * capture_probe_count, else: 0
     preamble_symbols = 288  # 9 di-bits × 32 chips
     initial_probe_symbols = 32
 

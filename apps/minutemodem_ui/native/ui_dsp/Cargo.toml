@@ -1,0 +1,18 @@
+[package]
+name = "ui_dsp"
+version = "0.1.0"
+edition = "2021"
+authors = ["HeroesLament"]
+description = "DSP utilities for MinuteModem UI canvases (spectrogram, constellation, meters)"
+
+[lib]
+name = "ui_dsp"
+crate-type = ["cdylib"]
+
+[dependencies]
+rustler = "0.37"
+rustfft = "6.1"
+
+[profile.release]
+opt-level = 3
+lto = true

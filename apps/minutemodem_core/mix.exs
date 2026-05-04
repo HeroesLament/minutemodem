@@ -17,7 +17,10 @@ defmodule MinuteModemCore.MixProject do
       extra_applications: [
         :logger,
         :membrane_core,
-        :ecto_sql
+        :ecto_sql,
+        :wx,
+        :observer,
+        :runtime_tools
       ]
     ]
   end
@@ -28,7 +31,6 @@ defmodule MinuteModemCore.MixProject do
       {:membrane_core, "~> 1.0"},
 
       # Audio I/O (mic + speakers)
-      {:membrane_portaudio_plugin, "~> 0.16"},
 
       # Persistence (Ecto + SQLite)
       {:ecto, "~> 3.13"},
@@ -39,7 +41,10 @@ defmodule MinuteModemCore.MixProject do
       {:gen_state_machine, "~> 3.0"},
 
       # Rustler for Rust NIFs
-      {:rustler, "~> 0.37"}
+      {:rustler, "~> 0.37"},
+
+      # License interlock
+      {:license_tui, in_umbrella: true}
     ]
   end
 end

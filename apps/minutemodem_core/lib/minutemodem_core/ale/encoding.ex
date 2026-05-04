@@ -168,6 +168,28 @@ defmodule MinuteModemCore.ALE.Encoding do
     end
   end
 
+  @doc """
+  Deinterleave soft values (tuples or any type). Same permutation as deinterleave/3.
+  """
+  def deinterleave_soft(symbols, rows, cols) do
+    capacity = rows * cols
+
+    padded =
+      symbols
+      |> Enum.take(capacity)
+      |> then(fn s ->
+        pad_length = capacity - length(s)
+        s ++ List.duplicate({0.0, 0.0}, pad_length)
+      end)
+
+    matrix = padded |> Enum.chunk_every(rows)
+
+    for row <- 0..(rows - 1),
+        col <- 0..(cols - 1) do
+      matrix |> Enum.at(col) |> Enum.at(row)
+    end
+  end
+
   # -------------------------------------------------------------------
   # Helpers
   # -------------------------------------------------------------------

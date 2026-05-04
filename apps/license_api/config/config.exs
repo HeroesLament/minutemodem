@@ -7,3 +7,5 @@ config :license_api, ecto_repos: [LicenseAPI.Repo]
 
 # Private key path — set in runtime.exs for prod
 config :license_api, :private_key_path, nil
+
+config :license_api, :private_key_path, "./dev_license_private.key"

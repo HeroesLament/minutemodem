@@ -487,6 +487,29 @@ defmodule MinuteModemCore.ALE.PDU do
      }}
   end
 
+  defp decode_payload(<<@proto_lsu::3, @lsu_type_status::3, v::1, m::1, rest::binary>>) do
+    <<
+      ec::2,
+      status::6,
+      caller::little-16,
+      count::8,
+      _reserved::8,
+      assigned::little-16,
+      _padding::16
+    >> = rest
+
+    {:ok,
+     %LsuStatus{
+       voice: bit_to_bool(v),
+       more: bit_to_bool(m),
+       equipment_class: ec,
+       status: status,
+       caller_addr: caller,
+       count: count,
+       assigned_subchannels: assigned
+     }}
+  end
+
   defp decode_payload(_), do: {:error, :unknown_pdu_type}
 
   # -------------------------------------------------------------------

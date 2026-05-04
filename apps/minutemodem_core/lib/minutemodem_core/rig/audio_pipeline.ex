@@ -41,6 +41,7 @@ defmodule MinuteModemCore.Rig.AudioPipeline do
       sample_rate: sample_rate,
       use_simnet: use_simnet,
       subscribed: false,
+      events_monitor: nil,
       opts: opts
     }, {:continue, :subscribe}}
   end
@@ -52,18 +53,38 @@ defmodule MinuteModemCore.Rig.AudioPipeline do
   end
 
   @impl true
-  def handle_info(:subscribe, %{subscribed: false} = state) do
-    case Events.subscribe(state.rig_id, self(), filter: :tx) do
-      :ok ->
-        Logger.debug("[Rig.AudioPipeline] Subscribed to modem events")
-        {:noreply, %{state | subscribed: true}}
-      _ ->
+  def handle_info(:subscribe, state) do
+    case do_subscribe(state) do
+      {:ok, new_state} -> {:noreply, new_state}
+      :retry ->
         Process.send_after(self(), :subscribe, 100)
-        {:noreply, state}
+        {:noreply, %{state | subscribed: false, events_monitor: nil}}
     end
   end
 
-  def handle_info(:subscribe, state), do: {:noreply, state}
+  # Events process crashed — re-subscribe
+  @impl true
+  def handle_info({:DOWN, ref, :process, _pid, _reason}, %{events_monitor: ref} = state) do
+    Logger.warning("[Rig.AudioPipeline] Events process died, re-subscribing")
+    Process.send_after(self(), :subscribe, 100)
+    {:noreply, %{state | subscribed: false, events_monitor: nil}}
+  end
+
+  defp do_subscribe(state) do
+    # Demonitor previous Events pid if we had one
+    if state.events_monitor, do: Process.demonitor(state.events_monitor, [:flush])
+
+    case Events.subscribe(state.rig_id, self(), filter: :tx) do
+      :ok ->
+        # Monitor the Events pid so we can re-subscribe if it restarts
+        events_pid = GenServer.whereis(Events.via(state.rig_id))
+        monitor_ref = if events_pid, do: Process.monitor(events_pid)
+        Logger.debug("[Rig.AudioPipeline] Subscribed to modem events (monitor=#{inspect(monitor_ref)})")
+        {:ok, %{state | subscribed: true, events_monitor: monitor_ref}}
+      _ ->
+        :retry
+    end
+  end
 
   @impl true
   def handle_info({:modem, {:tx_audio, samples}}, state) do
@@ -76,14 +97,7 @@ defmodule MinuteModemCore.Rig.AudioPipeline do
       # Convert to f32 for simnet (it expects f32 native)
       f32_binary = s16_to_f32(audio_binary)
 
-      case SimnetBridge.tx(state.rig_id, f32_binary) do
-        :ok -> :ok
-        {:error, :not_attached} ->
-          Logger.warning("[Rig.AudioPipeline] SimnetBridge not attached, falling back to speakers")
-          AudioPipeline.play_tx(audio_binary, state.sample_rate, rig_id: state.rig_id)
-        {:error, reason} ->
-          Logger.warning("[Rig.AudioPipeline] SimnetBridge TX failed: #{inspect(reason)}")
-      end
+      SimnetBridge.tx(state.rig_id, f32_binary)
     else
       # Physical rig - play through speakers
       Logger.debug("[Rig.AudioPipeline] Playing #{byte_size(audio_binary)} bytes of TX audio")

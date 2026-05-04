@@ -11,6 +11,8 @@ defmodule LicenseAPI.Schemas.Activation do
     field :machine_os, :string
     field :machine_arch, :string
     field :ip_address, :string
+    field :assertion_string, :string
+    field :status, :string, default: "active"
 
     belongs_to :license, LicenseAPI.Schemas.License, type: :binary_id
 
@@ -19,7 +21,7 @@ defmodule LicenseAPI.Schemas.Activation do
 
   def changeset(activation, attrs) do
     activation
-    |> cast(attrs, [:key_hash, :machine_id, :machine_hostname, :machine_os, :machine_arch, :ip_address, :license_id])
+    |> cast(attrs, [:key_hash, :machine_id, :machine_hostname, :machine_os, :machine_arch, :ip_address, :assertion_string, :status, :license_id])
     |> validate_required([:key_hash, :machine_id])
   end
 end

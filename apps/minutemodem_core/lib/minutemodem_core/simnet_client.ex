@@ -92,6 +92,17 @@ defmodule MinuteModemCore.Rig.SimnetClient do
   end
 
   ## ------------------------------------------------------------------
+  ## Frequency Control
+  ## ------------------------------------------------------------------
+
+  def set_rx_frequency(rig_id, freq_hz) do
+    case rpc_call(MinutemodemSimnet, :set_rx_frequency, [rig_id, freq_hz]) do
+      {:badrpc, reason} -> {:error, {:simnet_unreachable, reason}}
+      result -> result
+    end
+  end
+
+  ## ------------------------------------------------------------------
   ## Channel Info
   ## ------------------------------------------------------------------
 

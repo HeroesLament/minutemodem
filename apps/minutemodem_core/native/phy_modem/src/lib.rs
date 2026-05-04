@@ -28,6 +28,7 @@ fn on_load(env: Env, _info: Term) -> bool {
     let _ = rustler::resource!(nif::DemodulatorResource, env);
     let _ = rustler::resource!(nif::UnifiedModulatorResource, env);
     let _ = rustler::resource!(nif::UnifiedDemodulatorResource, env);
+    let _ = rustler::resource!(nif::WalshCorrelatorResource, env);
     true
 }
 
@@ -64,6 +65,7 @@ rustler::init!(
         nif::unified_demod_new,
         nif::unified_demod_iq,
         nif::unified_demod_symbols,
+        nif::unified_demod_eq_iq,
         nif::unified_demod_set_constellation,
         nif::unified_demod_reset,
         
@@ -77,6 +79,26 @@ rustler::init!(
         nif::unified_demod_enable_eq,
         nif::unified_demod_disable_eq,
         nif::unified_demod_eq_mode,
+        
+        // PLL telemetry
+        nif::unified_demod_enable_telemetry,
+        nif::unified_demod_take_telemetry,
+        nif::unified_demod_lock_detect,
+        nif::unified_demod_set_block_size,
+        nif::unified_demod_get_block_size,
+        nif::unified_demod_enable_dfe_telemetry,
+        nif::unified_demod_take_dfe_telemetry,
+        
+        // Walsh correlator
+        nif::walsh_correlator_new,
+        nif::walsh_correlator_decode,
+        nif::walsh_correlator_decode_soft,
+        nif::walsh_correlator_decode_diagnostic,
+        nif::walsh_correlator_enable_telemetry,
+        nif::walsh_correlator_take_telemetry,
+        
+        // Turbo (iterative Walsh ↔ BCJR) decoder
+        nif::walsh_turbo_decode,
     ],
     load = on_load
 );

@@ -20,7 +20,7 @@ defmodule LicenseUI.MixProject do
   defp deps do
     [
       {:license_core, in_umbrella: true},
-      {:wx_mvu, "~> 0.1"}
+      {:wx_mvu, path: "C:/build/wx_mvu", override: true}
     ]
   end
 end

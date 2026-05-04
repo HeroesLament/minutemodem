@@ -109,7 +109,7 @@ defmodule MinuteModemCore.ALE.Transmitter do
     PhyModem.unified_mod_reset(state.modulator)
 
     duration_ms = length(all_samples) / state.sample_rate * 1000
-    Logger.debug("ALE TX [#{state.rig_id}] #{length(all_samples)} samples, #{round(duration_ms)}ms")
+    Logger.info("ALE TX [#{state.rig_id}] #{length(symbols)} symbols -> #{length(all_samples)} samples (#{round(duration_ms)}ms)")
 
     result = send_to_audio_pipeline(state.rig_id, all_samples, state.sample_rate)
 
