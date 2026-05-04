@@ -1,0 +1,8 @@
+-sname station
+-setcookie <%= @release.options[:cookie] %>
+
+## Enable heart for automatic restart on crash
+-heart
+
+## Increase process limit for membrane pipelines
++P 1048576

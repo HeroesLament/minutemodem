@@ -1,0 +1,3 @@
+-name ui@<%= System.get_env("HOSTNAME", "localhost") %>
+-setcookie <%= @release.options[:cookie] %>
+-heart
